@@ -8,10 +8,13 @@ from django.views.decorators.csrf import csrf_exempt
 from django.contrib.auth.decorators import login_required
 from django.http import JsonResponse, HttpResponse, HttpResponseBadRequest
 from django.conf import settings
+from django.utils import timezone
+
 from organizations.models import Organization
-from .models import WaIntegration, WaMessage
+from .models import WaIntegration, WaMessage, WaConversation
 from .crypto import enc, dec
 from .services import set_webhook_sandbox, send_text_sandbox
+from .utils import normalize_msisdn
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +83,25 @@ def connect_sandbox(request):
         action = "created" if created else "updated"
         logger.info(f"✓ Integration {action} successfully: ID {integ.id}")
         
+        logger.info(f"Step 5: Creating conversation for tester...")
+        try:
+            # Normalize tester phone number
+            tester_phone = normalize_msisdn(tester)
+            if tester_phone:
+                # Create conversation for the tester
+                conv, conv_created = WaConversation.objects.get_or_create(
+                    integration=integ,
+                    wa_id=tester_phone,
+                    status='open',
+                    defaults={"started_by": "admin"}
+                )
+                conv_action = "created" if conv_created else "found existing"
+                logger.info(f"✓ Conversation {conv_action}: ID {conv.id}")
+            else:
+                logger.warning("Could not normalize tester phone number")
+        except Exception as conv_error:
+            logger.warning(f"Failed to create conversation: {str(conv_error)}")
+        
         logger.info("=== CONNECT SANDBOX VIEW COMPLETED SUCCESSFULLY ===")
         return JsonResponse({"ok": True, "integration_id": integ.id})
         
@@ -89,7 +111,7 @@ def connect_sandbox(request):
 
 @csrf_exempt
 def webhook_360dialog(request):
-    """Receive webhook messages from 360dialog with smart organization routing"""
+    """Receive webhook messages from 360dialog with conversation management and idempotency"""
     logger.info("=== WEBHOOK RECEIVED ===")
     logger.info(f"Request method: {request.method}")
     logger.info(f"Request headers: {dict(request.headers)}")
@@ -106,7 +128,7 @@ def webhook_360dialog(request):
         payload = json.loads(request.body.decode("utf-8"))
         logger.info(f"Webhook payload keys: {list(payload.keys())}")
         
-        # Process messages with organization routing
+        # Process messages with conversation management
         logger.info("Step 2: Processing messages...")
         messages = []
         entry = payload.get("entry") or []
@@ -130,14 +152,14 @@ def webhook_360dialog(request):
         
         logger.info(f"Total messages to process: {len(messages)}")
         
-        # Route messages by organization
+        # Process messages with conversation management
         processed_count = 0
         for i, (val, m) in enumerate(messages):
             try:
                 logger.info(f"Processing message {i+1}/{len(messages)}...")
                 
                 # Extract message details
-                from_phone = m.get("from") or m.get("wa_id") or ""
+                from_phone = normalize_msisdn(m.get("from") or m.get("wa_id") or "")
                 msg_id = m.get("id") or ""
                 msg_type = m.get("type") or "text"
                 text = ""
@@ -152,9 +174,27 @@ def webhook_360dialog(request):
                 
                 # Find integration by phone number (organization routing)
                 logger.info(f"Looking for integration with tester_msisdn: {from_phone}")
+                
+                # Try to find integration with normalized phone number (both with and without +)
                 integration = WaIntegration.objects.filter(
                     tester_msisdn=from_phone
                 ).first()
+                
+                # If not found, try without + prefix
+                if not integration:
+                    from_phone_no_plus = from_phone.lstrip('+') if from_phone.startswith('+') else from_phone
+                    logger.info(f"Trying without + prefix: {from_phone_no_plus}")
+                    integration = WaIntegration.objects.filter(
+                        tester_msisdn=from_phone_no_plus
+                    ).first()
+                
+                # If still not found, try with + prefix
+                if not integration and not from_phone.startswith('+'):
+                    from_phone_with_plus = '+' + from_phone
+                    logger.info(f"Trying with + prefix: {from_phone_with_plus}")
+                    integration = WaIntegration.objects.filter(
+                        tester_msisdn=from_phone_with_plus
+                    ).first()
                 
                 if not integration:
                     logger.warning(f"No integration found for phone: {from_phone}")
@@ -162,19 +202,69 @@ def webhook_360dialog(request):
                 
                 logger.info(f"✓ Found integration: {integration.organization.name} (ID: {integration.id})")
                 
-                # Store message with organization context
-                message = WaMessage.objects.create(
-                    integration=integration,
-                    direction='in',
-                    wa_id=from_phone,
-                    msg_id=msg_id,
-                    msg_type=msg_type,
-                    text=text,
-                    payload=payload
-                )
+                # Find or create conversation
+                logger.info(f"Step 3: Managing conversation for {from_phone}...")
+                conv = (WaConversation.objects
+                        .filter(integration=integration, wa_id=from_phone, status='open')
+                        .order_by('-last_msg_at').first())
                 
-                logger.info(f"✓ Message stored with ID: {message.id}")
-                processed_count += 1
+                if not conv:
+                    logger.info(f"Creating new conversation for {from_phone}")
+                    conv = WaConversation.objects.create(
+                        integration=integration, 
+                        wa_id=from_phone, 
+                        started_by="contact", 
+                        status="open"
+                    )
+                    logger.info(f"✓ New conversation created: ID {conv.id}")
+                else:
+                    logger.info(f"✓ Using existing conversation: ID {conv.id}")
+                
+                # Idempotent message creation
+                logger.info(f"Step 4: Creating message record (idempotent)...")
+                if msg_id:
+                    # Try to find existing message by msg_id
+                    existing_msg = WaMessage.objects.filter(
+                        integration=integration,
+                        msg_id=msg_id
+                    ).first()
+                    
+                    if existing_msg:
+                        logger.info(f"✓ Message already exists (idempotency): ID {existing_msg.id}")
+                        # Update conversation timestamp
+                        conv.last_msg_at = timezone.now()
+                        conv.save(update_fields=['last_msg_at'])
+                        processed_count += 1
+                        continue
+                else:
+                    # Generate fallback ID for messages without msg_id
+                    msg_id = f"in_{from_phone}_{m.get('timestamp','')}"
+                    logger.info(f"Generated fallback msg_id: {msg_id}")
+                
+                # Create new message
+                try:
+                    message = WaMessage.objects.create(
+                        integration=integration,
+                        conversation=conv,
+                        direction='in',
+                        wa_id=from_phone,
+                        msg_id=msg_id,
+                        msg_type='text' if msg_type == 'text' else msg_type,
+                        text=text,
+                        payload=payload
+                    )
+                    logger.info(f"✓ Message stored with ID: {message.id}")
+                    
+                    # Update conversation timestamp
+                    conv.last_msg_at = timezone.now()
+                    conv.save(update_fields=['last_msg_at'])
+                    logger.info(f"✓ Conversation timestamp updated")
+                    
+                    processed_count += 1
+                    
+                except Exception as create_error:
+                    logger.error(f"Failed to create message: {str(create_error)}")
+                    continue
                 
             except Exception as msg_error:
                 logger.error(f"Failed to process message {i+1}: {str(msg_error)}")
@@ -222,7 +312,31 @@ def send_text(request):
         
         logger.info(f"✓ Found integration: ID {integ.id}")
         
-        logger.info(f"Step 4: Decrypting API key...")
+        logger.info(f"Step 4: Managing conversation...")
+        # Normalize phone number
+        to_phone = normalize_msisdn(to)
+        if not to_phone:
+            logger.error("Invalid phone number format")
+            return HttpResponseBadRequest("Invalid phone number format")
+        
+        # Find or create conversation
+        conv = (WaConversation.objects
+                .filter(integration=integ, wa_id=to_phone, status='open')
+                .order_by('-last_msg_at').first())
+        
+        if not conv:
+            logger.info(f"Creating new conversation for {to_phone}")
+            conv = WaConversation.objects.create(
+                integration=integ, 
+                wa_id=to_phone, 
+                started_by="admin", 
+                status="open"
+            )
+            logger.info(f"✓ New conversation created: ID {conv.id}")
+        else:
+            logger.info(f"✓ Using existing conversation: ID {conv.id}")
+        
+        logger.info(f"Step 5: Decrypting API key...")
         try:
             api_key = dec(integ.api_key_encrypted)
             logger.info(f"✓ API key decrypted successfully, length: {len(api_key)}")
@@ -230,32 +344,46 @@ def send_text(request):
             logger.error(f"Failed to decrypt API key: {str(decrypt_error)}")
             return JsonResponse({"error": f"API key decryption failed: {str(decrypt_error)}"}, status=500)
         
-        logger.info(f"Step 5: Sending message via 360dialog...")
+        logger.info(f"Step 6: Sending message via 360dialog...")
         try:
-            resp = send_text_sandbox(api_key, to, text)
+            resp = send_text_sandbox(api_key, to_phone, text)
             logger.info(f"✓ Message sent successfully, response: {resp}")
         except Exception as send_error:
             logger.error(f"Failed to send message: {str(send_error)}")
             return JsonResponse({"error": f"Message sending failed: {str(send_error)}"}, status=500)
         
-        logger.info(f"Step 6: Storing message in database...")
+        logger.info(f"Step 7: Storing message in database...")
         try:
+            # Extract message ID from response, with fallback
+            msg_id = str(resp.get("messages", [{}])[0].get("id", "")) if isinstance(resp, dict) else ""
+            if not msg_id:
+                logger.warning("No message ID in response, generating fallback")
+                import uuid
+                msg_id = f"out_{uuid.uuid4().hex[:16]}"
+            
             message = WaMessage.objects.create(
                 integration=integ,
+                conversation=conv,
                 direction='out',
-                wa_id=to,
-                msg_id=str(resp.get("messages", [{}])[0].get("id", "")),
+                wa_id=to_phone,
+                msg_id=msg_id,
                 msg_type="text",
                 text=text,
                 payload=resp
             )
             logger.info(f"✓ Message stored with ID: {message.id}")
+            
+            # Update conversation timestamp
+            conv.last_msg_at = timezone.now()
+            conv.save(update_fields=['last_msg_at'])
+            logger.info(f"✓ Conversation timestamp updated")
+            
         except Exception as db_error:
             logger.error(f"Failed to store message: {str(db_error)}")
             return JsonResponse({"error": f"Message sent but storage failed: {str(db_error)}"}, status=500)
         
         logger.info("=== SEND TEXT VIEW COMPLETED SUCCESSFULLY ===")
-        return JsonResponse({"ok": True, "resp": resp})
+        return JsonResponse({"ok": True, "resp": resp, "conversation_id": conv.id})
         
     except Exception as e:
         logger.error(f"=== SEND TEXT VIEW FAILED: {str(e)} ===")

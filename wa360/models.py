@@ -105,23 +105,68 @@ class WaIntegration(models.Model):
         """Check if integration has a valid API key"""
         return bool(self.api_key_encrypted)
 
+class WaConversation(models.Model):
+    """WhatsApp Conversation Model - Groups messages between a contact and integration"""
+    STATUS_CHOICES = [('open', 'Open'), ('closed', 'Closed')]
+    
+    integration = models.ForeignKey('WaIntegration', on_delete=models.CASCADE, related_name='conversations')
+    wa_id = models.CharField(max_length=32, db_index=True, help_text="WhatsApp ID of the contact")
+    started_by = models.CharField(max_length=32, blank=True, default="admin", 
+                                help_text="Who started the conversation: admin|contact|system")
+    status = models.CharField(max_length=12, choices=STATUS_CHOICES, default='open')
+    started_at = models.DateTimeField(auto_now_add=True)
+    last_msg_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['integration', 'wa_id']),
+            models.Index(fields=['status', 'last_msg_at']),
+        ]
+        ordering = ['-last_msg_at']
+
+    def __str__(self):
+        return f"Conv #{self.id} [{self.status}] with {self.wa_id} ({self.integration.organization.name})"
+
+    @property
+    def is_open(self):
+        """Check if conversation is currently open"""
+        return self.status == 'open'
+
+    def close(self):
+        """Close the conversation and update timestamp"""
+        logger.info(f"Closing conversation {self.id} for {self.wa_id}")
+        self.status = 'closed'
+        self.save(update_fields=['status', 'last_msg_at'])
+        logger.info(f"✓ Conversation {self.id} closed successfully")
+
 class WaMessage(models.Model):
-    """WhatsApp Message Model"""
+    """WhatsApp Message Model - Individual messages within conversations"""
     DIRECTION_CHOICES = [('in', 'Incoming'), ('out', 'Outgoing')]
-    MSG_TYPE_CHOICES = [('text', 'Text'), ('image', 'Image'), ('audio', 'Audio'), ('video', 'Video')]
+    MSG_TYPE_CHOICES = [('text', 'Text'), ('image', 'Image'), ('audio', 'Audio'), 
+                        ('video', 'Video'), ('template', 'Template')]
     
     integration = models.ForeignKey(WaIntegration, on_delete=models.CASCADE, related_name="messages")
+    conversation = models.ForeignKey('WaConversation', on_delete=models.SET_NULL, null=True, 
+                                   blank=True, related_name='messages', 
+                                   help_text="Conversation this message belongs to")
     direction = models.CharField(max_length=3, choices=DIRECTION_CHOICES)
-    wa_id = models.CharField(max_length=32)
-    msg_id = models.CharField(max_length=100, blank=True, default="")
+    wa_id = models.CharField(max_length=32, help_text="WhatsApp ID of sender/recipient")
+    msg_id = models.CharField(max_length=100, blank=True, default="", 
+                            help_text="Unique message ID from WhatsApp")
     msg_type = models.CharField(max_length=24, choices=MSG_TYPE_CHOICES, default="text")
-    text = models.TextField(blank=True, default="")
-    payload = models.JSONField(default=dict, blank=True)
+    text = models.TextField(blank=True, default="", help_text="Message text content")
+    payload = models.JSONField(default=dict, blank=True, help_text="Full message payload from WhatsApp")
     created_at = models.DateTimeField(auto_now_add=True)
     
     class Meta:
-        indexes = [models.Index(fields=['integration', 'created_at'])]
+        indexes = [
+            models.Index(fields=['integration', 'created_at']),
+            models.Index(fields=['conversation', 'created_at'])
+        ]
         ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(fields=['integration', 'msg_id'], name='uniq_integration_msgid')
+        ]
     
     def __str__(self):
         return f"{self.direction.upper()} {self.msg_type} to/from {self.wa_id}"

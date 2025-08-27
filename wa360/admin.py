@@ -3,10 +3,12 @@ from django.contrib import messages
 from django.shortcuts import redirect
 from django.conf import settings
 from django import forms
+from django.utils import timezone
 import logging
-from .models import WaIntegration, WaMessage
+from .models import WaIntegration, WaMessage, WaConversation  # add WaConversation
 from .crypto import enc, dec
-from .services import set_webhook_sandbox, send_text_sandbox
+from .services import set_webhook_sandbox, send_text_sandbox, send_template_sandbox  # add send_template_sandbox
+from .utils import normalize_msisdn, digits_only
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +97,46 @@ class WaIntegrationAdmin(admin.ModelAdmin):
     
     ordering = ['-created_at']
     
-    actions = ['connect_sandbox', 'send_message', 'update_webhook_url']
+    actions = ['connect_sandbox', 'send_message', 'update_webhook_url', 'create_conversation']  # add create_conversation
+    
+    def create_conversation(self, request, queryset):
+        """Admin action to create conversation row for tester"""
+        logger.info("=== CREATE CONVERSATION ACTION STARTED ===")
+        
+        if queryset.count() != 1:
+            logger.warning("Multiple integrations selected, need exactly one")
+            self.message_user(request, "Select exactly one integration.", level=messages.WARNING)
+            return
+        
+        integration = queryset.first()
+        logger.info(f"Processing integration ID: {integration.id} for org: {integration.organization.name}")
+        
+        try:
+            wa_id = normalize_msisdn(integration.tester_msisdn)
+            if not wa_id:
+                logger.error("No valid tester phone number found")
+                self.message_user(request, "No valid tester phone number found.", level=messages.ERROR)
+                return
+            
+            logger.info(f"Creating conversation for phone: {wa_id}")
+            
+            conv, created = WaConversation.objects.get_or_create(
+                integration=integration, 
+                wa_id=wa_id, 
+                status='open', 
+                defaults={"started_by": "admin"}
+            )
+            
+            action = "created" if created else "found existing"
+            logger.info(f"✓ Conversation {action}: ID {conv.id}")
+            
+            self.message_user(request, f"Conversation #{conv.id} ready for {wa_id}", level=messages.SUCCESS)
+            
+        except Exception as e:
+            logger.error(f"Failed to create conversation: {str(e)}")
+            self.message_user(request, f"Failed: {e}", level=messages.ERROR)
+    
+    create_conversation.short_description = "Create conversation row for tester"
     
     def update_webhook_url(self, request, queryset):
         """Admin action to update webhook URL when ngrok URL changes"""
@@ -430,8 +471,28 @@ class WaIntegrationAdmin(admin.ModelAdmin):
                     import uuid
                     msg_id = f"admin_{uuid.uuid4().hex[:16]}"
                 
+                # Find or create conversation
+                logger.info("Step 5.5: Managing conversation...")
+                to_phone = normalize_msisdn(to_phone)
+                conv = (WaConversation.objects
+                        .filter(integration=integration, wa_id=to_phone, status='open')
+                        .order_by('-last_msg_at').first())
+                
+                if not conv:
+                    logger.info(f"Creating new conversation for {to_phone}")
+                    conv = WaConversation.objects.create(
+                        integration=integration, 
+                        wa_id=to_phone, 
+                        started_by="admin", 
+                        status="open"
+                    )
+                    logger.info(f"✓ New conversation created: ID {conv.id}")
+                else:
+                    logger.info(f"✓ Using existing conversation: ID {conv.id}")
+                
                 message = WaMessage.objects.create(
                     integration=integration,
+                    conversation=conv,  # Add conversation reference
                     direction='out',
                     wa_id=to_phone,
                     msg_id=msg_id,
@@ -441,6 +502,11 @@ class WaIntegrationAdmin(admin.ModelAdmin):
                 )
                 
                 logger.info(f"✓ Message stored in database with ID: {message.id}")
+                
+                # Update conversation timestamp
+                conv.last_msg_at = timezone.now()
+                conv.save(update_fields=['last_msg_at'])
+                logger.info(f"✓ Conversation timestamp updated")
                 
             except Exception as db_error:
                 logger.error(f"Failed to store message in database: {str(db_error)}")
@@ -476,9 +542,207 @@ class WaIntegrationAdmin(admin.ModelAdmin):
 
 @admin.register(WaMessage)
 class WaMessageAdmin(admin.ModelAdmin):
-    list_display = ['direction', 'wa_id', 'msg_type', 'integration', 'created_at']
-    list_filter = ['direction', 'msg_type', 'created_at', 'integration__mode']
-    search_fields = ['wa_id', 'text', 'integration__organization__name']
+    list_display = ['direction', 'wa_id', 'msg_type', 'conversation', 'integration', 'created_at']
+    list_filter = ['direction', 'msg_type', 'created_at', 'integration__mode', 'conversation__status']
+    search_fields = ['wa_id', 'text', 'integration__organization__name', 'conversation__wa_id']
     readonly_fields = ['created_at']
     ordering = ['-created_at']
     date_hierarchy = 'created_at'
+
+@admin.register(WaConversation)
+class WaConversationAdmin(admin.ModelAdmin):
+    """Admin interface for WhatsApp conversations with template and messaging actions"""
+    list_display = ['id', 'integration', 'wa_id', 'status', 'started_by', 'started_at', 'last_msg_at', 'message_count']
+    list_filter = ['status', 'integration__mode', 'integration__organization']
+    search_fields = ['wa_id', 'integration__organization__name']
+    readonly_fields = ['started_at', 'last_msg_at']
+    actions = ['start_with_template', 'send_text', 'end_conversation']
+
+    def message_count(self, obj): 
+        """Display message count for conversation"""
+        return obj.messages.count()
+    message_count.short_description = "Messages"
+
+    def _get_api_key(self, integration):
+        """Get decrypted API key with error handling"""
+        try:
+            api_key = integration.get_api_key()
+            if not api_key: 
+                raise Exception("Failed to decrypt API key")
+            return api_key
+        except Exception as e:
+            logger.error(f"Failed to get API key: {str(e)}")
+            raise
+
+    @admin.action(description="Start with template (Sandbox)")
+    def start_with_template(self, request, queryset):
+        """Admin action to start conversation with template message"""
+        logger.info("=== START WITH TEMPLATE ACTION STARTED ===")
+        
+        if queryset.count() != 1:
+            logger.warning("Multiple conversations selected, need exactly one")
+            self.message_user(request, "Select exactly one conversation.", level=messages.WARNING)
+            return
+        
+        conv = queryset.first()
+        integ = conv.integration
+        logger.info(f"Processing conversation ID: {conv.id} for integration: {integ.id}")
+        
+        try:
+            # Get API key
+            logger.info("Step 1: Getting API key...")
+            api_key = self._get_api_key(integ)
+            logger.info("✓ API key retrieved successfully")
+            
+            # Normalize phone number
+            logger.info("Step 2: Normalizing phone number...")
+            to_phone = normalize_msisdn(conv.wa_id or integ.tester_msisdn)
+            if not to_phone:
+                raise Exception("No valid phone number found")
+            logger.info(f"✓ Phone number normalized: {to_phone}")
+            
+            # Sandbox preflight guard - can only send to own number
+            logger.info("Step 2.5: Checking sandbox permissions...")
+            own_number = digits_only(integ.tester_msisdn)
+            dest_number = digits_only(to_phone)
+            if own_number != dest_number:
+                error_msg = f"Sandbox can only send to your own number ({own_number}). Selected conversation is {dest_number}."
+                logger.error(error_msg)
+                self.message_user(request, error_msg, level=messages.ERROR)
+                return
+            logger.info(f"✓ Sandbox permission check passed: {dest_number}")
+            
+            # Use simple template
+            template_name = "disclaimer"
+            logger.info(f"Step 3: Using template: {template_name}")
+            
+            # Send template
+            logger.info("Step 4: Sending template via API...")
+            resp = send_template_sandbox(api_key, to_phone, template_name, components=[])
+            logger.info("✓ Template sent successfully")
+            
+            # Extract message ID
+            msg_id = str(resp.get("messages", [{}])[0].get("id", "")) if isinstance(resp, dict) else ""
+            if not msg_id:
+                logger.warning("No message ID in response, generating fallback")
+                import uuid
+                msg_id = f"template_{uuid.uuid4().hex[:16]}"
+            
+            # Create message record
+            logger.info("Step 5: Creating message record...")
+            WaMessage.objects.create(
+                integration=integ, 
+                conversation=conv, 
+                direction='out', 
+                wa_id=to_phone,
+                msg_id=msg_id, 
+                msg_type='template', 
+                text=f"[TEMPLATE] {template_name}", 
+                payload=resp
+            )
+            logger.info("✓ Message record created")
+            
+            # Reopen conversation if closed
+            if not conv.is_open:
+                logger.info("Step 6: Reopening closed conversation...")
+                conv.status = 'open'
+                conv.save(update_fields=['status', 'last_msg_at'])
+                logger.info("✓ Conversation reopened")
+            
+            logger.info("=== START WITH TEMPLATE ACTION COMPLETED SUCCESSFULLY ===")
+            self.message_user(request, f"Template '{template_name}' sent to {to_phone}.", level=messages.SUCCESS)
+            
+        except Exception as e:
+            logger.exception("start_with_template failed")
+            self.message_user(request, f"Failed to send template: {e}", level=messages.ERROR)
+
+    @admin.action(description="Send text (append)")
+    def send_text(self, request, queryset):
+        """Admin action to send text message to conversation"""
+        logger.info("=== SEND TEXT ACTION STARTED ===")
+        
+        if queryset.count() != 1:
+            logger.warning("Multiple conversations selected, need exactly one")
+            self.message_user(request, "Select exactly one conversation.", level=messages.WARNING)
+            return
+        
+        conv = queryset.first()
+        integ = conv.integration
+        logger.info(f"Processing conversation ID: {conv.id} for integration: {integ.id}")
+        
+        try:
+            # Get API key
+            logger.info("Step 1: Getting API key...")
+            api_key = self._get_api_key(integ)
+            logger.info("✓ API key retrieved successfully")
+            
+            # Normalize phone number
+            logger.info("Step 2: Normalizing phone number...")
+            to_phone = normalize_msisdn(conv.wa_id or integ.tester_msisdn)
+            if not to_phone:
+                raise Exception("No valid phone number found")
+            logger.info(f"✓ Phone number normalized: {to_phone}")
+            
+            # Get text from request
+            text = request.GET.get("text", "Hello from Admin!")
+            logger.info(f"Step 3: Sending text: {text[:50]}...")
+            
+            # Send text message
+            logger.info("Step 4: Sending text via API...")
+            resp = send_text_sandbox(api_key, to_phone, text)
+            logger.info("✓ Text message sent successfully")
+            
+            # Extract message ID
+            msg_id = str(resp.get("messages", [{}])[0].get("id", "")) if isinstance(resp, dict) else ""
+            if not msg_id:
+                logger.warning("No message ID in response, generating fallback")
+                import uuid
+                msg_id = f"text_{uuid.uuid4().hex[:16]}"
+            
+            # Create message record
+            logger.info("Step 5: Creating message record...")
+            WaMessage.objects.create(
+                integration=integ, 
+                conversation=conv, 
+                direction='out', 
+                wa_id=to_phone,
+                msg_id=msg_id, 
+                msg_type='text', 
+                text=text, 
+                payload=resp
+            )
+            logger.info("✓ Message record created")
+            
+            # Reopen conversation if closed
+            if not conv.is_open:
+                logger.info("Step 6: Reopening closed conversation...")
+                conv.status = 'open'
+                conv.save(update_fields=['status', 'last_msg_at'])
+                logger.info("✓ Conversation reopened")
+            
+            logger.info("=== SEND TEXT ACTION COMPLETED SUCCESSFULLY ===")
+            self.message_user(request, f"Message sent to {to_phone}", level=messages.SUCCESS)
+            
+        except Exception as e:
+            logger.exception("send_text failed")
+            self.message_user(request, f"Failed to send text: {e}", level=messages.ERROR)
+
+    @admin.action(description="End conversation")
+    def end_conversation(self, request, queryset):
+        """Admin action to end conversations"""
+        logger.info("=== END CONVERSATION ACTION STARTED ===")
+        
+        n = 0
+        for conv in queryset:
+            try:
+                if conv.is_open:
+                    logger.info(f"Closing conversation {conv.id}...")
+                    conv.close()
+                    n += 1
+                    logger.info(f"✓ Conversation {conv.id} closed")
+            except Exception as e:
+                logger.error(f"Failed to close conversation {conv.id}: {str(e)}")
+                continue
+        
+        logger.info(f"=== END CONVERSATION ACTION COMPLETED: {n} conversation(s) closed ===")
+        self.message_user(request, f"Closed {n} conversation(s).", level=messages.SUCCESS)
