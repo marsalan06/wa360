@@ -1,0 +1,5 @@
+.env
+venv/
+__pycache__/
+server_info
+wa360.log
