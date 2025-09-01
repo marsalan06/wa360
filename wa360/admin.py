@@ -4,6 +4,8 @@ from django.shortcuts import redirect
 from django.conf import settings
 from django import forms
 from django.utils import timezone
+from django.contrib import admin
+from organizations.models import Organization, OrganizationUser
 import logging
 from .models import WaIntegration, WaMessage, WaConversation  # add WaConversation
 from .crypto import enc, dec
@@ -746,3 +748,34 @@ class WaConversationAdmin(admin.ModelAdmin):
         
         logger.info(f"=== END CONVERSATION ACTION COMPLETED: {n} conversation(s) closed ===")
         self.message_user(request, f"Closed {n} conversation(s).", level=messages.SUCCESS)
+
+
+class OrganizationAdmin(admin.ModelAdmin):
+    def get_queryset(self, request):
+        qs = super().get_queryset(request)
+        if request.user.is_superuser:
+            return qs
+        return qs.filter(users=request.user)
+
+
+class OrganizationUserAdmin(admin.ModelAdmin):
+    list_display = ("get_username", "organization")
+
+    def get_username(self, obj):
+        return obj.user.username  
+    get_username.short_description = "Username"
+
+    def get_queryset(self, request):
+        qs = super().get_queryset(request)
+        if request.user.is_superuser:
+            return qs
+
+        return qs.filter(organization__in=Organization.objects.filter(users=request.user))
+
+
+admin.site.unregister(Organization)
+admin.site.register(Organization, OrganizationAdmin)
+
+admin.site.unregister(OrganizationUser)
+admin.site.register(OrganizationUser, OrganizationUserAdmin)
+
