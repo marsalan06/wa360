@@ -13,7 +13,7 @@ from django.utils import timezone
 from organizations.models import Organization
 from .models import WaIntegration, WaMessage, WaConversation
 from .crypto import enc, dec
-from .services import set_webhook_sandbox, send_text_sandbox
+from .services import set_webhook_sandbox, send_text_sandbox, format_conversation_for_llm, get_latest_open_conversation_by_number
 from .utils import normalize_msisdn
 
 logger = logging.getLogger(__name__)
@@ -348,4 +348,54 @@ def send_text(request):
         
     except Exception as e:
         logger.error(f"=== SEND TEXT VIEW FAILED: {str(e)} ===")
+        return JsonResponse({"error": str(e)}, status=500)
+
+@login_required
+def get_conversation_json(request, conversation_id):
+    """Get formatted conversation JSON for LLM consumption"""
+    logger.info(f"=== GET CONVERSATION JSON STARTED for ID {conversation_id} ===")
+    
+    try:
+        conversation = WaConversation.objects.for_user(request.user).filter(id=conversation_id).first()
+        
+        if not conversation:
+            logger.error(f"Conversation {conversation_id} not found or access denied")
+            return JsonResponse({"error": "Conversation not found"}, status=404)
+        
+        logger.info(f"✓ Found conversation: {conversation.wa_id} (ID: {conversation.id})")
+        
+        formatted_conversation = format_conversation_for_llm(conversation)
+        
+        logger.info(f"✓ Conversation formatted successfully with {len(formatted_conversation['messages'])} messages")
+        
+        return JsonResponse({
+            "success": True,
+            "conversation": formatted_conversation
+        })
+        
+    except Exception as e:
+        logger.error(f"=== GET CONVERSATION JSON FAILED: {str(e)} ===")
+        return JsonResponse({"error": str(e)}, status=500)
+
+@login_required
+def get_conversation_by_number(request, wa_id):
+    """Get latest open conversation by WhatsApp number"""
+    logger.info(f"=== GET CONVERSATION BY NUMBER STARTED for {wa_id} ===")
+    
+    try:
+        result = get_latest_open_conversation_by_number(wa_id, request.user)
+        
+        if "error" in result:
+            logger.error(f"Error getting conversation by number: {result['error']}")
+            return JsonResponse(result, status=404)
+        
+        logger.info(f"✓ Conversation by number retrieved successfully")
+        
+        return JsonResponse({
+            "success": True,
+            "conversation": result
+        })
+        
+    except Exception as e:
+        logger.error(f"=== GET CONVERSATION BY NUMBER FAILED: {str(e)} ===")
         return JsonResponse({"error": str(e)}, status=500)
