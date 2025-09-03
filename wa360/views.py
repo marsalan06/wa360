@@ -7,6 +7,7 @@ import logging
 from django.views.decorators.csrf import csrf_exempt
 from django.contrib.auth.decorators import login_required
 from django.http import JsonResponse, HttpResponse, HttpResponseBadRequest
+from django.shortcuts import render
 from django.conf import settings
 from django.utils import timezone
 
@@ -260,8 +261,12 @@ def send_text(request):
             return HttpResponseBadRequest("to & text required")
         
         logger.info(f"Step 2: Getting active organization...")
-        org = _active_org(request)
-        logger.info(f"✓ Organization: {org.name} (ID: {org.id})")
+        try:
+            org = _active_org(request)
+            logger.info(f"✓ Organization: {org.name} (ID: {org.id})")
+        except Exception as org_error:
+            logger.error(f"No active organization found: {str(org_error)}")
+            return JsonResponse({"error": "No active organization. Please select an organization first."}, status=400)
         
         logger.info(f"Step 3: Finding integration...")
         # Use organization-aware manager
@@ -399,3 +404,40 @@ def get_conversation_by_number(request, wa_id):
     except Exception as e:
         logger.error(f"=== GET CONVERSATION BY NUMBER FAILED: {str(e)} ===")
         return JsonResponse({"error": str(e)}, status=500)
+
+@login_required
+def whatsapp_chat(request):
+    """WhatsApp chat interface"""
+    try:
+        # Check if user has an active organization, if not set the first one
+        if not request.session.get("active_org_id"):
+            user_orgs = Organization.objects.filter(users=request.user)
+            if user_orgs.exists():
+                first_org = user_orgs.first()
+                request.session["active_org_id"] = first_org.id
+                logger.info(f"Auto-selected organization: {first_org.name} (ID: {first_org.id}) for user {request.user.username}")
+            else:
+                logger.error(f"User {request.user.username} has no organizations")
+                return render(request, 'wa360/chat.html', {
+                    'phone_numbers': [],
+                    'error': 'No organizations found for this user'
+                })
+        
+        # Get user's conversations to extract unique phone numbers
+        conversations = WaConversation.objects.for_user(request.user).filter(status='open').order_by('-last_msg_at')
+        
+        # Extract unique phone numbers from conversations
+        phone_numbers = list(conversations.values_list('wa_id', flat=True).distinct())
+        
+        logger.info(f"Found {len(phone_numbers)} phone numbers for user {request.user.username}")
+        
+        return render(request, 'wa360/chat.html', {
+            'phone_numbers': phone_numbers
+        })
+        
+    except Exception as e:
+        logger.error(f"Error loading WhatsApp chat: {str(e)}")
+        return render(request, 'wa360/chat.html', {
+            'phone_numbers': [],
+            'error': str(e)
+        })

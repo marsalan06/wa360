@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WhatsApp Chat</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f0f0f0;
+        }
+        .container {
+            max-width: 600px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+        .header {
+            background: #25D366;
+            color: white;
+            padding: 10px;
+            text-align: center;
+        }
+        .chat-container {
+            height: 350px;
+            overflow-y: auto;
+            padding: 15px;
+            background: #e5ddd5;
+        }
+        .message {
+            margin: 10px 0;
+            padding: 10px 15px;
+            border-radius: 18px;
+            max-width: 70%;
+            word-wrap: break-word;
+        }
+        .client-message {
+            background: #dcf8c6;
+            margin-left: auto;
+            text-align: right;
+        }
+        .bot-message {
+            background: white;
+            margin-right: auto;
+        }
+        .message-time {
+            font-size: 11px;
+            color: #666;
+            margin-top: 5px;
+        }
+        .input-container {
+            padding: 15px;
+            background: white;
+            border-top: 1px solid #ddd;
+        }
+        .input-group {
+            display: flex;
+            gap: 10px;
+        }
+        input[type="text"] {
+            flex: 1;
+            padding: 12px;
+            border: 1px solid #ddd;
+            border-radius: 25px;
+            outline: none;
+        }
+        button {
+            padding: 12px 20px;
+            background: #25D366;
+            color: white;
+            border: none;
+            border-radius: 25px;
+            cursor: pointer;
+        }
+        button:hover {
+            background: #128C7E;
+        }
+        .phone-input {
+            margin-bottom: 10px;
+        }
+        .phone-input select {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            background: white;
+        }
+        .status {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 5px;
+            text-align: center;
+        }
+        .status.success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .status.error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h2>WhatsApp Chat Interface</h2>
+        </div>
+        
+        <div class="input-container">
+            <div class="phone-input">
+                <select id="phoneNumber">
+                    <option value="">Select a phone number</option>
+                    {% for phone in phone_numbers %}
+                    <option value="{{ phone }}">{{ phone }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+        </div>
+        
+        <div id="status"></div>
+        
+        {% if error %}
+        <div class="status error">{{ error }}</div>
+        {% endif %}
+        
+        <div class="chat-container" id="chatContainer">
+            <div style="text-align: center; color: #666; margin-top: 50px;">
+                Select a phone number and start chatting!
+            </div>
+        </div>
+        
+        <div class="input-container">
+            <div class="input-group">
+                <input type="text" id="messageInput" placeholder="Type your message..." onkeypress="handleKeyPress(event)">
+                <button onclick="sendMessage()">Send</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentPhoneNumber = '';
+        
+        function handleKeyPress(event) {
+            if (event.key === 'Enter') {
+                sendMessage();
+            }
+        }
+        
+        function sendMessage() {
+            const phoneNumber = document.getElementById('phoneNumber').value.trim();
+            const message = document.getElementById('messageInput').value.trim();
+            
+            if (!phoneNumber || !message) {
+                showStatus('Please enter both phone number and message', 'error');
+                return;
+            }
+            
+            currentPhoneNumber = phoneNumber;
+            
+            fetch('/api/wa360/send-text', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRFToken': getCookie('csrftoken')
+                },
+                body: JSON.stringify({
+                    to: phoneNumber,
+                    text: message
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    document.getElementById('messageInput').value = '';
+                    showStatus('Message sent successfully!', 'success');
+                    loadConversation();
+                } else {
+                    showStatus('Error: ' + data.error, 'error');
+                }
+            })
+            .catch(error => {
+                showStatus('Error sending message: ' + error, 'error');
+            });
+        }
+        
+        function loadConversation() {
+            if (!currentPhoneNumber) return;
+            
+            fetch(`/api/wa360/conversations/number/${encodeURIComponent(currentPhoneNumber)}/json`)
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    displayMessages(data.conversation.messages);
+                } else {
+                    showStatus('No conversation found for this number', 'error');
+                }
+            })
+            .catch(error => {
+                showStatus('Error loading conversation: ' + error, 'error');
+            });
+        }
+        
+        function displayMessages(messages) {
+            const chatContainer = document.getElementById('chatContainer');
+            chatContainer.innerHTML = '';
+            
+            messages.forEach(msg => {
+                const messageDiv = document.createElement('div');
+                messageDiv.className = `message ${msg.sender === 'Client' ? 'client-message' : 'bot-message'}`;
+                
+                const time = new Date(msg.timestamp).toLocaleTimeString();
+                
+                messageDiv.innerHTML = `
+                    <div>${msg.message}</div>
+                    <div class="message-time">${time}</div>
+                `;
+                
+                chatContainer.appendChild(messageDiv);
+            });
+            
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+        }
+        
+        function showStatus(message, type) {
+            const statusDiv = document.getElementById('status');
+            statusDiv.className = `status ${type}`;
+            statusDiv.textContent = message;
+        }
+        
+        function getCookie(name) {
+            let cookieValue = null;
+            if (document.cookie && document.cookie !== '') {
+                const cookies = document.cookie.split(';');
+                for (let i = 0; i < cookies.length; i++) {
+                    const cookie = cookies[i].trim();
+                    if (cookie.substring(0, name.length + 1) === (name + '=')) {
+                        cookieValue = decodeURIComponent(cookie.substring(name.length + 1));
+                        break;
+                    }
+                }
+            }
+            return cookieValue;
+        }
+        
+        // Load conversation when phone number changes
+        document.getElementById('phoneNumber').addEventListener('change', function() {
+            if (this.value.trim()) {
+                currentPhoneNumber = this.value.trim();
+                loadConversation();
+            }
+        });
+        
+        // Auto-refresh conversation every 5 seconds
+        setInterval(() => {
+            if (currentPhoneNumber) {
+                loadConversation();
+            }
+        }, 5000);
+    </script>
+</body>
+</html>
