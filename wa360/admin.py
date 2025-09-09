@@ -6,7 +6,7 @@ from django import forms
 from django.utils import timezone
 from organizations.models import Organization, OrganizationUser
 import logging
-from .models import WaIntegration, WaMessage, WaConversation
+from .models import WaIntegration, WaMessage, WaConversation, LLMConfiguration, ConversationSummary
 from .crypto import enc, dec
 from .services import set_webhook_sandbox, send_text_sandbox, send_template_sandbox
 from .utils import normalize_msisdn, digits_only
@@ -624,6 +624,109 @@ class OrganizationUserAdmin(admin.ModelAdmin):
             user_orgs = Organization.objects.filter(users=request.user)
             form.base_fields['organization'].queryset = user_orgs
         return form
+
+# ============================================================================
+# LLM CONFIGURATION ADMIN
+# ============================================================================
+
+class LLMConfigurationAdminForm(forms.ModelForm):
+    """Custom form for LLMConfiguration with API key validation"""
+    
+    class Meta:
+        model = LLMConfiguration
+        fields = '__all__'
+        widgets = {
+            'client_context': forms.Textarea(attrs={'rows': 4}),
+            'project_context': forms.Textarea(attrs={'rows': 4}),
+            'custom_instructions': forms.Textarea(attrs={'rows': 4}),
+        }
+    
+    def clean_temperature(self):
+        temp = self.cleaned_data.get('temperature')
+        if temp < 0.0 or temp > 1.0:
+            raise forms.ValidationError("Temperature must be between 0.0 and 1.0")
+        return temp
+    
+    def clean_max_tokens(self):
+        tokens = self.cleaned_data.get('max_tokens')
+        if tokens < 1 or tokens > 4000:
+            raise forms.ValidationError("Max tokens must be between 1 and 4000")
+        return tokens
+
+@admin.register(LLMConfiguration)
+class LLMConfigurationAdmin(admin.ModelAdmin):
+    form = LLMConfigurationAdminForm
+    list_display = ['organization', 'model', 'temperature', 'max_tokens', 'api_key_status', 'updated_at']
+    list_filter = ['model', 'updated_at']
+    search_fields = ['organization__name']
+    ordering = ['-updated_at']
+    
+    fieldsets = (
+        ('Organization', {
+            'fields': ('organization',)
+        }),
+        ('OpenAI Configuration', {
+            'fields': ('raw_api_key', 'model', 'temperature', 'max_tokens'),
+            'description': 'Enter your OpenAI API key. It will be encrypted automatically.'
+        }),
+        ('Context Settings', {
+            'fields': ('client_context', 'project_context', 'custom_instructions'),
+            'description': 'These fields will be included in the AI system prompt.',
+            'classes': ('collapse',)
+        }),
+        ('Timestamps', {
+            'fields': ('created_at', 'updated_at'),
+            'classes': ('collapse',)
+        })
+    )
+    
+    def get_queryset(self, request):
+        """Use organization-aware manager"""
+        return self.model.objects.for_user(request.user)
+    
+    def get_form(self, request, obj=None, **kwargs):
+        """Filter organization field choices for staff users"""
+        form = super().get_form(request, obj, **kwargs)
+        if not request.user.is_superuser:
+            user_orgs = Organization.objects.filter(users=request.user)
+            form.base_fields['organization'].queryset = user_orgs
+        return form
+    
+    def get_readonly_fields(self, request, obj=None):
+        """Make fields readonly based on context"""
+        return ['created_at', 'updated_at']
+    
+    def api_key_status(self, obj):
+        """Show API key status"""
+        if not obj.api_key_encrypted:
+            return "❌ No Key"
+        try:
+            test_key = obj.get_api_key()
+            return "✅ Valid" if test_key else "❌ Invalid"
+        except Exception:
+            return "❌ Error"
+    api_key_status.short_description = "API Key Status"
+
+# ============================================================================
+# CONVERSATION SUMMARY ADMIN
+# ============================================================================
+
+@admin.register(ConversationSummary)
+class ConversationSummaryAdmin(admin.ModelAdmin):
+    list_display = ['conversation', 'message_count', 'needs_update_status', 'updated_at']
+    list_filter = ['updated_at']
+    search_fields = ['conversation__wa_id', 'conversation__integration__organization__name']
+    readonly_fields = ['created_at', 'updated_at', 'needs_update_status']
+    ordering = ['-updated_at']
+    
+    def get_queryset(self, request):
+        """Use organization-aware manager"""
+        return self.model.objects.for_user(request.user)
+    
+    def needs_update_status(self, obj):
+        """Show if summary needs updating"""
+        return "🔄 Needs Update" if obj.needs_update() else "✅ Up to Date"
+    needs_update_status.short_description = "Status"
 
 # Register organization models
 admin.site.unregister(Organization)

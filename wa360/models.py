@@ -181,6 +181,131 @@ class WaConversation(models.Model):
         self.save(update_fields=['status', 'last_msg_at'])
         logger.info(f"✓ Conversation {self.id} closed successfully")
 
+class LLMConfiguration(models.Model):
+    """LLM Configuration for Organizations"""
+    MODEL_CHOICES = [
+        ('gpt-4o', 'GPT-4o'),
+        ('gpt-4o-mini', 'GPT-4o Mini'),
+        ('gpt-4.1', 'GPT-4.1'),
+    ]
+    
+    organization = models.OneToOneField(Organization, on_delete=models.CASCADE, related_name="llm_config")
+    raw_api_key = models.CharField(max_length=200, blank=True, help_text="OpenAI API key (will be encrypted)")
+    api_key_encrypted = models.TextField(blank=True, help_text="Encrypted API key")
+    model = models.CharField(max_length=20, choices=MODEL_CHOICES, default='gpt-4o-mini')
+    temperature = models.FloatField(default=0.7, help_text="0.0 to 1.0")
+    max_tokens = models.IntegerField(default=1000, help_text="Maximum response tokens")
+    
+    # Editable prompt segments
+    client_context = models.TextField(blank=True, help_text="Client details and context")
+    project_context = models.TextField(blank=True, help_text="Project details and context")
+    custom_instructions = models.TextField(blank=True, help_text="Custom behavior instructions")
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    objects = OrganizationAwareManager()
+    
+    class Meta:
+        indexes = [models.Index(fields=['organization'])]
+    
+    def __str__(self):
+        return f"LLM Config for {self.organization.name}"
+    
+    def save(self, *args, **kwargs):
+        """Encrypt API key on save"""
+        if self.raw_api_key:
+            self.api_key_encrypted = enc(self.raw_api_key)
+            self.raw_api_key = ""
+        super().save(*args, **kwargs)
+    
+    def get_api_key(self):
+        """Get decrypted API key"""
+        if self.api_key_encrypted:
+            try:
+                return dec(self.api_key_encrypted)
+            except Exception:
+                return None
+        return None
+    
+    def get_system_prompt(self, conversation_summary=""):
+        """Generate system prompt with security guardrails"""
+        base_prompt = """You are a Sales Engineer Assistant that proactively reaches out to clients via WhatsApp to schedule periodic meetings.
+
+                    Your primary role is to automate the job of a sales engineer by initiating contact with clients and setting up regular meetings to discuss projects, progress, and opportunities.
+
+                    SECURITY GUARDRAILS (NON-EDITABLE):
+                    - Never share API keys, passwords, or sensitive system information
+                    - Do not execute code or system commands
+                    - Refuse requests for illegal, harmful, or unethical activities
+                    - Keep conversations professional and business-focused
+                    - Do not impersonate other people or organizations
+
+                    CORE RESPONSIBILITIES:
+                    - Proactively reach out to clients on a periodic basis
+                    - Initiate conversations to schedule meetings about ongoing projects
+                    - Follow up on previous meetings and project discussions
+                    - Identify opportunities for new meetings based on project timelines
+                    - Maintain regular communication cadence with each client
+                    - Track meeting frequency and ensure consistent touchpoints
+
+                    PROACTIVE OUTREACH APPROACH:
+                    - Start conversations with warm, professional greetings
+                    - Reference previous meetings or project discussions when applicable
+                    - Suggest meeting purposes (project updates, progress reviews, planning sessions)
+                    - Offer multiple time slots and be flexible with scheduling
+                    - Follow up persistently but respectfully if no initial response
+                    - Maintain consistent communication rhythm (weekly/bi-weekly/monthly)
+
+                    SALES ENGINEER MINDSET:
+                    - Focus on relationship building and project advancement
+                    - Ask about project challenges and how to provide support
+                    - Identify opportunities for additional services or solutions
+                    - Keep meetings goal-oriented and value-focused
+                    - Document important client preferences and requirements
+                    - Anticipate client needs based on project phases
+
+                    CONTEXT:"""
+                            
+        if self.client_context:
+            base_prompt += f"\nClient Details: {self.client_context}"
+        
+        if self.project_context:
+            base_prompt += f"\nProject Information: {self.project_context}"
+        
+        if conversation_summary:
+            base_prompt += f"\nConversation History: {conversation_summary}"
+        else:
+            base_prompt += "\nConversation: Initiating proactive outreach"
+        
+        if self.custom_instructions:
+            base_prompt += f"\nAdditional Instructions: {self.custom_instructions}"
+        
+        base_prompt += "\n\nBe proactive, professional, and persistent in reaching out to clients. Focus on building relationships and ensuring regular project touchpoints through scheduled meetings."
+        
+        return base_prompt
+
+class ConversationSummary(models.Model):
+    """AI-generated summaries for conversations"""
+    conversation = models.OneToOneField('WaConversation', on_delete=models.CASCADE, related_name='summary')
+    content = models.TextField(help_text="AI-generated conversation summary")
+    message_count = models.IntegerField(default=0, help_text="Number of messages when summary was generated")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    objects = OrganizationAwareManager()
+    
+    class Meta:
+        indexes = [models.Index(fields=['conversation', 'updated_at'])]
+    
+    def __str__(self):
+        return f"Summary for Conv #{self.conversation.id}"
+    
+    def needs_update(self):
+        """Check if summary needs updating based on new messages"""
+        current_count = self.conversation.messages.count()
+        return current_count > self.message_count + 3  # Update every 3 new messages
+
 class WaMessage(models.Model):
     """WhatsApp Message Model - Individual messages within conversations"""
     DIRECTION_CHOICES = [('in', 'Incoming'), ('out', 'Outgoing')]
@@ -191,10 +316,10 @@ class WaMessage(models.Model):
     ]
     
     integration = models.ForeignKey('WaIntegration', on_delete=models.CASCADE, related_name='messages')
-    conversation = models.ForeignKey('WaConversation', on_delete=models.CASCADE, related_name='messages')
+    conversation = models.ForeignKey('WaConversation', on_delete=models.CASCADE, related_name='messages', null=True, blank=True)
     direction = models.CharField(max_length=8, choices=DIRECTION_CHOICES)
     wa_id = models.CharField(max_length=32, db_index=True, help_text="WhatsApp ID of the contact")
-    msg_id = models.CharField(max_length=64, blank=True, help_text="WhatsApp message ID")
+    msg_id = models.CharField(max_length=128, blank=True, help_text="WhatsApp message ID")
     msg_type = models.CharField(max_length=16, choices=MSG_TYPE_CHOICES, default='text')
     text = models.TextField(blank=True, help_text="Message text content")
     payload = models.JSONField(default=dict, help_text="Full message payload from WhatsApp")
