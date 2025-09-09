@@ -6,6 +6,8 @@ from django.db import models
 from django.contrib.auth.models import User
 from organizations.models import Organization
 from .crypto import enc, dec
+from .utils import summarize_conversation
+
 
 logger = logging.getLogger(__name__)
 
@@ -284,6 +286,11 @@ class LLMConfiguration(models.Model):
         base_prompt += "\n\nBe proactive, professional, and persistent in reaching out to clients. Focus on building relationships and ensuring regular project touchpoints through scheduled meetings."
         
         return base_prompt
+    
+    def summarize_conversation(self, conversation):
+        """Generate AI summary for a conversation using utils"""
+        from .utils import summarize_conversation
+        return summarize_conversation(self, conversation)
 
 class ConversationSummary(models.Model):
     """AI-generated summaries for conversations"""
@@ -305,6 +312,20 @@ class ConversationSummary(models.Model):
         """Check if summary needs updating based on new messages"""
         current_count = self.conversation.messages.count()
         return current_count > self.message_count + 3  # Update every 3 new messages
+    
+    @classmethod
+    def generate_for_conversation(cls, conversation):
+        """Generate summary for a conversation using organization's LLM config"""
+        try:
+            llm_config = getattr(conversation.integration.organization, 'llm_config', None)
+            if not llm_config:
+                raise Exception("No LLM configuration found for organization")
+            
+            return summarize_conversation(llm_config, conversation)
+            
+        except Exception as e:
+            logger.error(f"Failed to generate summary for conversation {conversation.id}: {str(e)}")
+            raise
 
 class WaMessage(models.Model):
     """WhatsApp Message Model - Individual messages within conversations"""

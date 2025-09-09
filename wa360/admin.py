@@ -9,7 +9,8 @@ import logging
 from .models import WaIntegration, WaMessage, WaConversation, LLMConfiguration, ConversationSummary
 from .crypto import enc, dec
 from .services import set_webhook_sandbox, send_text_sandbox, send_template_sandbox
-from .utils import normalize_msisdn, digits_only
+from .utils import normalize_msisdn, digits_only, summarize_conversation
+
 
 logger = logging.getLogger(__name__)
 
@@ -438,7 +439,7 @@ class WaConversationAdmin(admin.ModelAdmin):
     list_filter = ['status', 'integration__mode', 'integration__organization']
     search_fields = ['wa_id', 'integration__organization__name']
     readonly_fields = ['started_at', 'last_msg_at']
-    actions = ['start_with_template', 'send_text', 'end_conversation']
+    actions = ['start_with_template', 'send_text', 'end_conversation', 'generate_summary']
     
     def get_queryset(self, request):
         """Use organization-aware manager"""
@@ -591,6 +592,46 @@ class WaConversationAdmin(admin.ModelAdmin):
                 continue
         
         self.message_user(request, f"Closed {n} conversation(s).", level=messages.SUCCESS)
+
+    @admin.action(description="Generate AI summary")
+    def generate_summary(self, request, queryset):
+        """Generate AI summaries for selected conversations"""        
+        success_count = 0
+        error_count = 0
+        
+        for conv in queryset:
+            try:
+                # Get LLM configuration for the organization
+                llm_config = getattr(conv.integration.organization, 'llm_config', None)
+                if not llm_config:
+                    logger.warning(f"No LLM configuration found for organization {conv.integration.organization.name}")
+                    error_count += 1
+                    continue
+                
+                # Generate summary using utils
+                summary_content = summarize_conversation(llm_config, conv)
+                success_count += 1
+                
+                logger.info(f"Generated summary for conversation {conv.id}")
+                
+            except Exception as e:
+                logger.error(f"Failed to generate summary for conversation {conv.id}: {str(e)}")
+                error_count += 1
+                continue
+        
+        if success_count > 0:
+            self.message_user(
+                request, 
+                f"✅ Generated {success_count} summaries successfully.", 
+                level=messages.SUCCESS
+            )
+        
+        if error_count > 0:
+            self.message_user(
+                request, 
+                f"❌ Failed to generate {error_count} summaries. Check LLM configuration and API keys.", 
+                level=messages.WARNING
+            )
 
 # ============================================================================
 # ORGANIZATION ADMIN
