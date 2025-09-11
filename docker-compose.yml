@@ -1,0 +1,90 @@
+services:
+  postgres-wa360:
+    image: postgres:15
+    container_name: wa360-postgres
+    environment:
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "${DB_PORT}:5432"
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: wa360-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+
+  web:
+    build: .
+    container_name: wa360-web
+    command: >
+      sh -c "python manage.py migrate &&
+             python manage.py collectstatic --noinput &&
+             python manage.py runserver 0.0.0.0:8000"
+    volumes:
+      # Mount source code for hot reloading
+      - .:/app
+      # Mount static files volume
+      - static_volume:/app/staticfiles
+    ports:
+      - "8000:8000"
+    environment:
+      - DEBUG=${DEBUG}
+      - DATABASE_URL=postgresql://${DB_USER}:${DB_PASSWORD}@postgres-wa360:5432/${DB_NAME}
+      - RABBITMQ_URL=${RABBITMQ_URL}
+      - D360_ENCRYPTION_KEY=${D360_ENCRYPTION_KEY}
+      - D360_WEBHOOK_URL=${D360_WEBHOOK_URL}
+    depends_on:
+      - postgres-wa360
+      - rabbitmq
+
+  celery:
+    build: .
+    container_name: wa360-celery
+    command: celery -A wa360 worker --loglevel=info
+    volumes:
+      # Mount source code for hot reloading
+      - .:/app
+    environment:
+      - DEBUG=${DEBUG}
+      - DATABASE_URL=postgresql://${DB_USER}:${DB_PASSWORD}@postgres-wa360:5432/${DB_NAME}
+      - RABBITMQ_URL=${RABBITMQ_URL}
+      - D360_ENCRYPTION_KEY=${D360_ENCRYPTION_KEY}
+      - D360_WEBHOOK_URL=${D360_WEBHOOK_URL}
+    depends_on:
+      - postgres-wa360
+      - rabbitmq
+
+  celery-beat:
+    build: .
+    container_name: wa360-celery-beat
+    command: celery -A wa360 beat --loglevel=info --scheduler django_celery_beat.schedulers:DatabaseScheduler
+    volumes:
+      # Mount source code for hot reloading
+      - .:/app
+      # Mount celery beat schedule data
+      - celery_beat_data:/app/celerybeat-schedule
+    environment:
+      - DEBUG=${DEBUG}
+      - DATABASE_URL=postgresql://${DB_USER}:${DB_PASSWORD}@postgres-wa360:5432/${DB_NAME}
+      - RABBITMQ_URL=${RABBITMQ_URL}
+      - D360_ENCRYPTION_KEY=${D360_ENCRYPTION_KEY}
+      - D360_WEBHOOK_URL=${D360_WEBHOOK_URL}
+    depends_on:
+      - postgres-wa360
+      - rabbitmq
+
+volumes:
+  postgres_data:
+  rabbitmq_data:
+  celery_beat_data:
+  static_volume:
