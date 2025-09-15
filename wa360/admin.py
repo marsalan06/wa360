@@ -6,7 +6,7 @@ from django import forms
 from django.utils import timezone
 from organizations.models import Organization, OrganizationUser
 import logging
-from .models import WaIntegration, WaMessage, WaConversation, LLMConfiguration, ConversationSummary
+from .models import WaIntegration, WaMessage, WaConversation, LLMConfiguration, ConversationSummary, PeriodicMessageSchedule
 from .crypto import enc, dec
 from .services import set_webhook_sandbox, send_text_sandbox, send_template_sandbox
 from .utils import normalize_msisdn, digits_only, summarize_conversation
@@ -371,6 +371,7 @@ class WaIntegrationAdmin(admin.ModelAdmin):
             logger.error(f"Failed to send message: {str(e)}")
             self.message_user(request, f"Failed to send message: {str(e)}", level=messages.ERROR)
     send_message.short_description = "Send test message via selected integration"
+    
     
     def save_model(self, request, obj, form, change):
         """Custom save method with logging and graceful error handling"""
@@ -768,6 +769,109 @@ class ConversationSummaryAdmin(admin.ModelAdmin):
         """Show if summary needs updating"""
         return "🔄 Needs Update" if obj.needs_update() else "✅ Up to Date"
     needs_update_status.short_description = "Status"
+
+
+@admin.register(PeriodicMessageSchedule)
+class PeriodicMessageScheduleAdmin(admin.ModelAdmin):
+    """Admin interface for periodic message schedules"""
+    list_display = ['organization', 'frequency', 'is_active', 'last_sent', 'next_run_time', 'created_at']
+    list_filter = ['frequency', 'is_active', 'created_at']
+    search_fields = ['organization__name']
+    readonly_fields = ['last_sent', 'created_at', 'updated_at', 'next_run_time']
+    actions = ['send_now', 'enable_schedule', 'disable_schedule', 'set_testing_mode', 'set_daily_mode']
+    
+    fieldsets = (
+        ('Schedule Settings', {
+            'fields': ('organization', 'frequency', 'is_active')
+        }),
+        ('Timing Information', {
+            'fields': ('last_sent', 'next_run_time', 'created_at', 'updated_at'),
+            'classes': ('collapse',)
+        })
+    )
+    
+    def get_queryset(self, request):
+        """Use organization-aware manager"""
+        return self.model.objects.for_user(request.user)
+    
+    def next_run_time(self, obj):
+        """Show next scheduled run time"""
+        next_run = obj.get_next_run_time()
+        if next_run:
+            return next_run.strftime("%Y-%m-%d %H:%M")
+        return "Not scheduled"
+    next_run_time.short_description = "Next Run"
+    
+    def send_now(self, request, queryset):
+        """Send periodic messages now for selected organizations"""
+        from .tasks import send_periodic_messages
+        
+        success_count = 0
+        for schedule in queryset:
+            if schedule.is_active:
+                try:
+                    # Pass the organization_id as argument
+                    result = send_periodic_messages.delay(schedule.organization.id)
+                    success_count += 1
+                    self.message_user(
+                        request, 
+                        f"✅ Queued periodic messages for {schedule.organization.name} (Task ID: {result.id})", 
+                        level=messages.SUCCESS
+                    )
+                except Exception as e:
+                    self.message_user(
+                        request, 
+                        f"❌ Failed to queue messages for {schedule.organization.name}: {str(e)}", 
+                        level=messages.ERROR
+                    )
+        
+        if success_count > 0:
+            self.message_user(
+                request, 
+                f"✅ Successfully queued periodic messages for {success_count} organization(s)", 
+                level=messages.SUCCESS
+            )
+    send_now.short_description = "Send periodic messages now"
+    
+    def enable_schedule(self, request, queryset):
+        """Enable periodic messaging for selected organizations"""
+        updated = queryset.update(is_active=True)
+        self.message_user(
+            request, 
+            f"✅ Enabled periodic messaging for {updated} organization(s)", 
+            level=messages.SUCCESS
+        )
+    enable_schedule.short_description = "Enable periodic messaging"
+    
+    def disable_schedule(self, request, queryset):
+        """Disable periodic messaging for selected organizations"""
+        updated = queryset.update(is_active=False)
+        self.message_user(
+            request, 
+            f"✅ Disabled periodic messaging for {updated} organization(s)", 
+            level=messages.SUCCESS
+        )
+    disable_schedule.short_description = "Disable periodic messaging"
+    
+    def set_testing_mode(self, request, queryset):
+        """Set frequency to minute for testing"""
+        updated = queryset.update(frequency='minute', is_active=True)
+        self.message_user(
+            request, 
+            f"✅ Set {updated} organization(s) to testing mode (every minute)", 
+            level=messages.SUCCESS
+        )
+    set_testing_mode.short_description = "Set to testing mode (every minute)"
+    
+    def set_daily_mode(self, request, queryset):
+        """Set frequency to daily for production"""
+        updated = queryset.update(frequency='daily', is_active=True)
+        self.message_user(
+            request, 
+            f"✅ Set {updated} organization(s) to daily mode", 
+            level=messages.SUCCESS
+        )
+    set_daily_mode.short_description = "Set to daily mode"
 
 # Register organization models
 admin.site.unregister(Organization)
