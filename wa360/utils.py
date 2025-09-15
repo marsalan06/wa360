@@ -102,6 +102,26 @@ def get_summarization_prompt():
 
     Provide a clear, concise summary that helps maintain context for future conversations."""
 
+def get_outreach_message_prompt():
+    """Generate prompt for proactive outreach message generation"""
+    return """Generate a brief, friendly message to reach out to the client about scheduling a meeting or project update.
+
+    MESSAGE GUIDELINES:
+    - Keep it concise and professional (under 200 characters)
+    - Be warm and friendly but not overly casual
+    - Focus on value proposition and next steps
+    - Avoid being pushy or sales-heavy
+    - Reference previous conversations if context is available
+    - Include a clear call-to-action (meeting, call, or response)
+
+    MESSAGE STRUCTURE:
+    - Greeting with client name if available
+    - Brief context or value reminder
+    - Specific ask (meeting, update, feedback)
+    - Easy response option
+
+    Generate a message that feels natural and builds on the existing relationship."""
+
 def build_conversation_text(conversation):
     """Build formatted conversation text from messages"""
     messages = conversation.messages.order_by('created_at')

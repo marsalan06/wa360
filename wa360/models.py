@@ -359,3 +359,67 @@ class WaMessage(models.Model):
 
     def __str__(self):
         return f"Msg #{self.id} [{self.direction}] {self.msg_type} to {self.wa_id}"
+
+
+class PeriodicMessageScheduleManager(models.Manager):
+    """Manager for PeriodicMessageSchedule with organization filtering"""
+    
+    def for_user(self, user):
+        """Filter schedules by user's organizations"""
+        if user.is_superuser:
+            return self.all()
+        
+        # Get user's organizations
+        from organizations.models import Organization
+        user_orgs = Organization.objects.filter(users=user)
+        return self.filter(organization__in=user_orgs)
+
+
+class PeriodicMessageSchedule(models.Model):
+    """Organization-specific periodic messaging schedule"""
+    FREQUENCY_CHOICES = [
+        ('minute', 'Every Minute (Testing)'),
+        ('daily', 'Daily'),
+        ('weekly', 'Weekly'),
+        ('monthly', 'Monthly'),
+        ('disabled', 'Disabled'),
+    ]
+    
+    organization = models.OneToOneField('organizations.Organization', on_delete=models.CASCADE, related_name='message_schedule')
+    frequency = models.CharField(max_length=20, choices=FREQUENCY_CHOICES, default='daily', help_text="How often to send periodic messages")
+    is_active = models.BooleanField(default=True, help_text="Enable/disable periodic messaging")
+    last_sent = models.DateTimeField(null=True, blank=True, help_text="When the last periodic message was sent")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    objects = PeriodicMessageScheduleManager()
+    
+    class Meta:
+        verbose_name = "Periodic Message Schedule"
+        verbose_name_plural = "Periodic Message Schedules"
+        ordering = ['-updated_at']
+    
+    def __str__(self):
+        return f"{self.organization.name} - {self.get_frequency_display()}"
+    
+    def get_next_run_time(self):
+        """Calculate next run time based on frequency"""
+        from django.utils import timezone
+        from datetime import timedelta
+        
+        if not self.is_active or self.frequency == 'disabled':
+            return None
+            
+        if not self.last_sent:
+            return timezone.now()
+            
+        if self.frequency == 'minute':
+            return self.last_sent + timedelta(minutes=1)
+        elif self.frequency == 'daily':
+            return self.last_sent + timedelta(days=1)
+        elif self.frequency == 'weekly':
+            return self.last_sent + timedelta(weeks=1)
+        elif self.frequency == 'monthly':
+            return self.last_sent + timedelta(days=30)
+        
+        return None

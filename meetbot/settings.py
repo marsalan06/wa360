@@ -13,6 +13,7 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 from pathlib import Path
 import os
 from dotenv import load_dotenv
+from .celery_beat_schedule import CELERY_BEAT_SCHEDULE
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -191,9 +192,3 @@ CELERY_TIMEZONE = TIME_ZONE
 CELERY_BEAT_SCHEDULER = 'django_celery_beat.schedulers:DatabaseScheduler'
 
 # Celery Beat Periodic Tasks
-CELERY_BEAT_SCHEDULE = {
-    'send-periodic-messages': {
-        'task': 'wa360.tasks.send_periodic_messages',
-        'schedule': 60.0 * 60 * 24,  # Run daily
-    },
-}
