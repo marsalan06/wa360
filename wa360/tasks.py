@@ -15,7 +15,7 @@ from django.utils import timezone
 logger = logging.getLogger(__name__)
 
 
-@shared_task
+@shared_task(bind=False)
 def send_periodic_messages(organization_id):
     """
     Send periodic messages to all integration numbers for a specific organization
@@ -137,7 +137,11 @@ def check_and_send_periodic_messages():
         try:
             # Check if it's time to send based on organization's schedule
             next_run = schedule.get_next_run_time()
-            if next_run and current_time >= next_run:
+            # For first run (last_sent is None), always trigger
+            # For subsequent runs, compare without microseconds
+            should_run = next_run and (schedule.last_sent is None or current_time.replace(microsecond=0) >= next_run.replace(microsecond=0))
+            logger.info(f"Schedule {schedule.organization.name}: next_run={next_run}, current_time={current_time}, last_sent={schedule.last_sent}, should_run={should_run}")
+            if should_run:
                 # Send messages for this organization
                 result = send_periodic_messages.delay(schedule.organization.id)
                 
