@@ -1,0 +1,229 @@
+{% extends 'base.html' %}
+
+{% block title %}Google Integration - WA360{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-12">
+        <h2><i class="fab fa-google"></i> Google Integration Dashboard</h2>
+        <p class="text-muted">Manage your Google Gmail and Calendar integration</p>
+    </div>
+</div>
+
+{% if not has_google_auth %}
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="alert alert-info">
+            <h5><i class="fas fa-info-circle"></i> Connect Your Google Account</h5>
+            <p>To use Gmail and Calendar features, you need to connect your Google account.</p>
+            <a href="{% url 'google_integration:oauth_initiate' %}" class="btn btn-primary">
+                <i class="fab fa-google"></i> Connect Google Account
+            </a>
+        </div>
+    </div>
+</div>
+{% else %}
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="alert alert-success">
+            <h5><i class="fas fa-check-circle"></i> Google Account Connected</h5>
+            <p>Your Google account is successfully connected. You can now use Gmail and Calendar features.</p>
+        </div>
+    </div>
+</div>
+
+<!-- Send Email Form -->
+<div class="row mb-4">
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header">
+                <h5><i class="fas fa-envelope"></i> Send Email via Gmail</h5>
+            </div>
+            <div class="card-body">
+                <form id="sendEmailForm">
+                    <div class="mb-3">
+                        <label class="form-label">Recipient Email</label>
+                        <input type="email" class="form-control" name="to_email" required>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Subject</label>
+                        <input type="text" class="form-control" name="subject" required>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Message</label>
+                        <textarea class="form-control" name="body" rows="4" required></textarea>
+                    </div>
+                    <button type="submit" class="btn btn-primary">
+                        <i class="fas fa-paper-plane"></i> Send Email
+                    </button>
+                </form>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Create Calendar Event Form -->
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header">
+                <h5><i class="fas fa-calendar-plus"></i> Create Calendar Event</h5>
+            </div>
+            <div class="card-body">
+                <form id="createEventForm">
+                    <div class="mb-3">
+                        <label class="form-label">Event Title</label>
+                        <input type="text" class="form-control" name="title" required>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Description</label>
+                        <textarea class="form-control" name="description" rows="2"></textarea>
+                    </div>
+                    <div class="row">
+                        <div class="col-6">
+                            <label class="form-label">Start Date & Time</label>
+                            <input type="datetime-local" class="form-control" name="start_datetime" required>
+                        </div>
+                        <div class="col-6">
+                            <label class="form-label">End Date & Time</label>
+                            <input type="datetime-local" class="form-control" name="end_datetime" required>
+                        </div>
+                    </div>
+                    <div class="mb-3 mt-3">
+                        <label class="form-label">Attendees (comma-separated emails)</label>
+                        <input type="text" class="form-control" name="attendees" placeholder="email1@example.com, email2@example.com">
+                    </div>
+                    <button type="submit" class="btn btn-success">
+                        <i class="fas fa-calendar-check"></i> Create Event
+                    </button>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Recent Activity -->
+<div class="row">
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header">
+                <h5><i class="fas fa-history"></i> Recent Emails</h5>
+            </div>
+            <div class="card-body">
+                {% if email_logs %}
+                    {% for email in email_logs %}
+                    <div class="d-flex justify-content-between align-items-center mb-2">
+                        <div>
+                            <strong>{{ email.recipient_email }}</strong><br>
+                            <small class="text-muted">{{ email.subject|truncatechars:30 }}</small>
+                        </div>
+                        <span class="badge bg-{% if email.status == 'sent' %}success{% elif email.status == 'failed' %}danger{% else %}warning{% endif %}">
+                            {{ email.get_status_display }}
+                        </span>
+                    </div>
+                    {% endfor %}
+                {% else %}
+                    <p class="text-muted">No emails sent yet.</p>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header">
+                <h5><i class="fas fa-calendar"></i> Recent Calendar Events</h5>
+            </div>
+            <div class="card-body">
+                {% if calendar_events %}
+                    {% for event in calendar_events %}
+                    <div class="d-flex justify-content-between align-items-center mb-2">
+                        <div>
+                            <strong>{{ event.title }}</strong><br>
+                            <small class="text-muted">{{ event.start_datetime|date:"M d, Y H:i" }}</small>
+                        </div>
+                        <span class="badge bg-{% if event.status == 'created' %}success{% elif event.status == 'cancelled' %}danger{% else %}warning{% endif %}">
+                            {{ event.get_status_display }}
+                        </span>
+                    </div>
+                    {% endfor %}
+                {% else %}
+                    <p class="text-muted">No calendar events created yet.</p>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Send Email Form Handler
+document.getElementById('sendEmailForm').addEventListener('submit', async function(e) {
+    e.preventDefault();
+    
+    const formData = new FormData(this);
+    const data = Object.fromEntries(formData.entries());
+    
+    try {
+        const response = await fetch('{% url "google_integration:api_send_email" %}', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRFToken': document.querySelector('[name=csrfmiddlewaretoken]').value
+            },
+            body: JSON.stringify(data)
+        });
+        
+        const result = await response.json();
+        
+        if (response.ok) {
+            alert('Email sent successfully!');
+            this.reset();
+            location.reload();
+        } else {
+            alert('Error sending email: ' + (result.error || 'Unknown error'));
+        }
+    } catch (error) {
+        alert('Error sending email: ' + error.message);
+    }
+});
+
+// Create Event Form Handler
+document.getElementById('createEventForm').addEventListener('submit', async function(e) {
+    e.preventDefault();
+    
+    const formData = new FormData(this);
+    const data = Object.fromEntries(formData.entries());
+    
+    // Convert attendees string to array
+    if (data.attendees) {
+        data.attendees = data.attendees.split(',').map(email => email.trim()).filter(email => email);
+    } else {
+        data.attendees = [];
+    }
+    
+    try {
+        const response = await fetch('{% url "google_integration:api_create_event" %}', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRFToken': document.querySelector('[name=csrfmiddlewaretoken]').value
+            },
+            body: JSON.stringify(data)
+        });
+        
+        const result = await response.json();
+        
+        if (response.ok) {
+            alert('Calendar event created successfully!');
+            this.reset();
+            location.reload();
+        } else {
+            alert('Error creating event: ' + (result.error || 'Unknown error'));
+        }
+    } catch (error) {
+        alert('Error creating event: ' + error.message);
+    }
+});
+</script>
+{% endblock %}
