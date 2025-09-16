@@ -21,6 +21,11 @@ from django.conf.urls.static import static
 
 urlpatterns = [
     path('admin/', admin.site.urls),
+    path('api/users/', include('users.urls')),
+    path('api/google/', include('google_integration.urls')),
+    # Web interface URLs
+    path('', include('users.urls', namespace='users_web')),
+    path('google/', include('google_integration.urls', namespace='google_web')),
     path('', include('wa360.urls')),
 ]
 

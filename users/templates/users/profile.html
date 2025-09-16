@@ -1,0 +1,500 @@
+{% extends 'base.html' %}
+
+{% block title %}User Profile - WA360{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-md-4">
+        <!-- User Info Card -->
+        <div class="card mb-4">
+            <div class="card-header">
+                <h5><i class="fas fa-user"></i> Profile Information</h5>
+            </div>
+            <div class="card-body text-center">
+                <div class="mb-3">
+                    <i class="fas fa-user-circle fa-5x text-primary"></i>
+                </div>
+                <h5 class="card-title">{{ user.full_name }}</h5>
+                <p class="card-text text-muted">{{ user.email }}</p>
+                
+                <!-- Verification Status -->
+                <div class="mb-3">
+                    <div class="d-flex justify-content-between align-items-center mb-2">
+                        <span>Email Verified:</span>
+                        {% if user.is_email_verified %}
+                            <span class="badge bg-success"><i class="fas fa-check"></i> Verified</span>
+                        {% else %}
+                            <span class="badge bg-warning"><i class="fas fa-clock"></i> Pending</span>
+                        {% endif %}
+                    </div>
+                    <div class="d-flex justify-content-between align-items-center">
+                        <span>Phone Verified:</span>
+                        {% if user.is_phone_verified %}
+                            <span class="badge bg-success"><i class="fas fa-check"></i> Verified</span>
+                        {% else %}
+                            <span class="badge bg-warning"><i class="fas fa-clock"></i> Pending</span>
+                        {% endif %}
+                    </div>
+                </div>
+                
+                <!-- Action Buttons -->
+                <div class="d-grid gap-2">
+                    <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#editProfileModal">
+                        <i class="fas fa-edit"></i> Edit Profile
+                    </button>
+                    {% if not user.is_email_verified %}
+                        <button class="btn btn-outline-warning btn-sm" onclick="resendEmailVerification()">
+                            <i class="fas fa-envelope"></i> Resend Email Verification
+                        </button>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+        
+        <!-- Account Details Card -->
+        <div class="card mb-4">
+            <div class="card-header">
+                <h6><i class="fas fa-info-circle"></i> Account Details</h6>
+            </div>
+            <div class="card-body">
+                <div class="row mb-2">
+                    <div class="col-sm-6"><strong>User ID:</strong></div>
+                    <div class="col-sm-6"><small class="text-muted">{{ user.id }}</small></div>
+                </div>
+                <div class="row mb-2">
+                    <div class="col-sm-6"><strong>Phone:</strong></div>
+                    <div class="col-sm-6">{{ user.phone_number }}</div>
+                </div>
+                <div class="row mb-2">
+                    <div class="col-sm-6"><strong>Joined:</strong></div>
+                    <div class="col-sm-6"><small>{{ user.created_at|date:"M d, Y" }}</small></div>
+                </div>
+                <div class="row mb-2">
+                    <div class="col-sm-6"><strong>Last Login:</strong></div>
+                    <div class="col-sm-6"><small>{{ user.last_login|date:"M d, Y H:i"|default:"Never" }}</small></div>
+                </div>
+                <div class="row">
+                    <div class="col-sm-6"><strong>Status:</strong></div>
+                    <div class="col-sm-6">
+                        {% if user.is_active %}
+                            <span class="badge bg-success">Active</span>
+                        {% else %}
+                            <span class="badge bg-danger">Inactive</span>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-8">
+        <!-- Google Integration Status -->
+        <div class="card mb-4">
+            <div class="card-header">
+                <h5><i class="fab fa-google"></i> Google Integration Status</h5>
+            </div>
+            <div class="card-body">
+                {% if profile.google_email %}
+                    <div class="alert alert-success">
+                        <div class="d-flex justify-content-between align-items-center">
+                            <div>
+                                <h6><i class="fas fa-check-circle"></i> Google Account Connected</h6>
+                                <p class="mb-0">Connected Email: <strong>{{ profile.google_email }}</strong></p>
+                                <small class="text-muted">Timezone: {{ profile.timezone }}</small>
+                            </div>
+                            <div>
+                                <a href="{% url 'google_integration:dashboard' %}" class="btn btn-primary">
+                                    <i class="fas fa-cog"></i> Manage
+                                </a>
+                            </div>
+                        </div>
+                    </div>
+                {% else %}
+                    <div class="alert alert-info">
+                        <div class="d-flex justify-content-between align-items-center">
+                            <div>
+                                <h6><i class="fas fa-info-circle"></i> Google Account Not Connected</h6>
+                                <p class="mb-0">Connect your Google account to use Gmail and Calendar features.</p>
+                            </div>
+                            <div>
+                                <a href="{% url 'google_integration:oauth_initiate' %}" class="btn btn-primary">
+                                    <i class="fab fa-google"></i> Connect Now
+                                </a>
+                            </div>
+                        </div>
+                    </div>
+                {% endif %}
+            </div>
+        </div>
+        
+        <!-- Recent Activity -->
+        <div class="card mb-4">
+            <div class="card-header">
+                <h5><i class="fas fa-activity"></i> Recent Activity</h5>
+            </div>
+            <div class="card-body">
+                <div class="row">
+                    <div class="col-md-6">
+                        <h6><i class="fas fa-envelope"></i> Recent Emails</h6>
+                        <div class="recent-emails">
+                            {% if user.sent_emails.all %}
+                                {% for email in user.sent_emails.all|slice:":3" %}
+                                    <div class="d-flex justify-content-between align-items-center py-2 border-bottom">
+                                        <div class="flex-grow-1">
+                                            <div class="fw-bold">{{ email.recipient_email }}</div>
+                                            <small class="text-muted">{{ email.subject|truncatechars:30 }}</small>
+                                            <br><small class="text-muted">{{ email.created_at|timesince }} ago</small>
+                                        </div>
+                                        <span class="badge bg-{% if email.status == 'sent' %}success{% elif email.status == 'failed' %}danger{% else %}warning{% endif %}">
+                                            {{ email.get_status_display }}
+                                        </span>
+                                    </div>
+                                {% endfor %}
+                                <div class="text-center mt-3">
+                                    <a href="{% url 'google_integration:dashboard' %}" class="btn btn-outline-primary btn-sm">
+                                        View All Emails
+                                    </a>
+                                </div>
+                            {% else %}
+                                <p class="text-muted">No emails sent yet.</p>
+                            {% endif %}
+                        </div>
+                    </div>
+                    
+                    <div class="col-md-6">
+                        <h6><i class="fas fa-calendar"></i> Upcoming Events</h6>
+                        <div class="recent-events">
+                            {% if user.calendar_events.all %}
+                                {% for event in user.calendar_events.all|slice:":3" %}
+                                    <div class="d-flex justify-content-between align-items-center py-2 border-bottom">
+                                        <div class="flex-grow-1">
+                                            <div class="fw-bold">{{ event.title }}</div>
+                                            <small class="text-muted">{{ event.start_datetime|date:"M d, Y H:i" }}</small>
+                                            {% if event.google_html_link %}
+                                                <br><a href="{{ event.google_html_link }}" target="_blank" class="text-decoration-none">
+                                                    <small><i class="fas fa-external-link-alt"></i> View in Google Calendar</small>
+                                                </a>
+                                            {% endif %}
+                                        </div>
+                                        <span class="badge bg-{% if event.status == 'created' %}success{% elif event.status == 'cancelled' %}danger{% else %}info{% endif %}">
+                                            {{ event.get_status_display }}
+                                        </span>
+                                    </div>
+                                {% endfor %}
+                                <div class="text-center mt-3">
+                                    <a href="{% url 'google_integration:dashboard' %}" class="btn btn-outline-primary btn-sm">
+                                        View All Events
+                                    </a>
+                                </div>
+                            {% else %}
+                                <p class="text-muted">No calendar events created yet.</p>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Security Settings -->
+        <div class="card">
+            <div class="card-header">
+                <h5><i class="fas fa-shield-alt"></i> Security Settings</h5>
+            </div>
+            <div class="card-body">
+                <div class="row">
+                    <div class="col-md-6">
+                        <h6>Password</h6>
+                        <p class="text-muted">Keep your account secure with a strong password.</p>
+                        <button class="btn btn-outline-primary" data-bs-toggle="modal" data-bs-target="#changePasswordModal">
+                            <i class="fas fa-key"></i> Change Password
+                        </button>
+                    </div>
+                    <div class="col-md-6">
+                        <h6>Account Actions</h6>
+                        <p class="text-muted">Manage your account settings and data.</p>
+                        <div class="d-grid gap-2">
+                            {% if not user.is_email_verified %}
+                                <button class="btn btn-outline-warning" onclick="resendEmailVerification()">
+                                    <i class="fas fa-envelope-open-text"></i> Verify Email
+                                </button>
+                            {% endif %}
+                            <button class="btn btn-outline-danger" data-bs-toggle="modal" data-bs-target="#deleteAccountModal">
+                                <i class="fas fa-trash"></i> Delete Account
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Edit Profile Modal -->
+<div class="modal fade" id="editProfileModal" tabindex="-1" aria-labelledby="editProfileModalLabel" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="editProfileModalLabel"><i class="fas fa-edit"></i> Edit Profile</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <form id="editProfileForm">
+                <div class="modal-body">
+                    <div class="mb-3">
+                        <label for="editFullName" class="form-label">Full Name</label>
+                        <input type="text" class="form-control" id="editFullName" name="full_name" value="{{ user.full_name }}" required>
+                    </div>
+                    <div class="mb-3">
+                        <label for="editEmail" class="form-label">Email Address</label>
+                        <input type="email" class="form-control" id="editEmail" name="email" value="{{ user.email }}" required>
+                        <small class="form-text text-muted">Changing email will require re-verification.</small>
+                    </div>
+                    <div class="mb-3">
+                        <label for="editPhone" class="form-label">Phone Number</label>
+                        <input type="tel" class="form-control" id="editPhone" name="phone_number" value="{{ user.phone_number }}" required>
+                    </div>
+                    <div class="mb-3">
+                        <label for="editTimezone" class="form-label">Timezone</label>
+                        <select class="form-control" id="editTimezone" name="timezone">
+                            <option value="Asia/Karachi" {% if profile.timezone == 'Asia/Karachi' %}selected{% endif %}>Asia/Karachi (PKT)</option>
+                            <option value="UTC" {% if profile.timezone == 'UTC' %}selected{% endif %}>UTC</option>
+                            <option value="America/New_York" {% if profile.timezone == 'America/New_York' %}selected{% endif %}>America/New_York (EST)</option>
+                            <option value="Europe/London" {% if profile.timezone == 'Europe/London' %}selected{% endif %}>Europe/London (GMT)</option>
+                            <option value="Asia/Dubai" {% if profile.timezone == 'Asia/Dubai' %}selected{% endif %}>Asia/Dubai (GST)</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="submit" class="btn btn-primary">
+                        <i class="fas fa-save"></i> Save Changes
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<!-- Change Password Modal -->
+<div class="modal fade" id="changePasswordModal" tabindex="-1" aria-labelledby="changePasswordModalLabel" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="changePasswordModalLabel"><i class="fas fa-key"></i> Change Password</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <form id="changePasswordForm">
+                <div class="modal-body">
+                    <div class="mb-3">
+                        <label for="currentPassword" class="form-label">Current Password</label>
+                        <input type="password" class="form-control" id="currentPassword" name="current_password" required>
+                    </div>
+                    <div class="mb-3">
+                        <label for="newPassword" class="form-label">New Password</label>
+                        <input type="password" class="form-control" id="newPassword" name="new_password" required>
+                        <small class="form-text text-muted">Password must be at least 8 characters with uppercase, lowercase, and numbers.</small>
+                    </div>
+                    <div class="mb-3">
+                        <label for="confirmPassword" class="form-label">Confirm New Password</label>
+                        <input type="password" class="form-control" id="confirmPassword" name="confirm_password" required>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="submit" class="btn btn-primary">
+                        <i class="fas fa-save"></i> Update Password
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<!-- Delete Account Modal -->
+<div class="modal fade" id="deleteAccountModal" tabindex="-1" aria-labelledby="deleteAccountModalLabel" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header bg-danger text-white">
+                <h5 class="modal-title" id="deleteAccountModalLabel"><i class="fas fa-exclamation-triangle"></i> Delete Account</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <div class="alert alert-danger">
+                    <strong>Warning!</strong> This action cannot be undone. Deleting your account will:
+                    <ul class="mb-0 mt-2">
+                        <li>Permanently delete all your data</li>
+                        <li>Remove all email logs and calendar events</li>
+                        <li>Disconnect your Google account integration</li>
+                        <li>Cancel any scheduled operations</li>
+                    </ul>
+                </div>
+                <p>To confirm deletion, please type your email address below:</p>
+                <input type="email" class="form-control" id="deleteConfirmEmail" placeholder="Enter your email to confirm">
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-danger" id="confirmDeleteBtn" disabled>
+                    <i class="fas fa-trash"></i> Delete My Account
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Edit Profile Form Handler
+document.getElementById('editProfileForm').addEventListener('submit', async function(e) {
+    e.preventDefault();
+    
+    const formData = new FormData(this);
+    const data = Object.fromEntries(formData.entries());
+    
+    try {
+        const response = await fetch('/api/users/update-profile/', {
+            method: 'PUT',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': 'Token ' + localStorage.getItem('auth_token'),
+                'X-CSRFToken': getCookie('csrftoken')
+            },
+            body: JSON.stringify(data)
+        });
+        
+        const result = await response.json();
+        
+        if (response.ok) {
+            alert('Profile updated successfully!');
+            location.reload();
+        } else {
+            alert('Error updating profile: ' + (result.error || 'Unknown error'));
+        }
+    } catch (error) {
+        alert('Error updating profile: ' + error.message);
+    }
+});
+
+// Change Password Form Handler
+document.getElementById('changePasswordForm').addEventListener('submit', async function(e) {
+    e.preventDefault();
+    
+    const formData = new FormData(this);
+    const data = Object.fromEntries(formData.entries());
+    
+    if (data.new_password !== data.confirm_password) {
+        alert('New passwords do not match!');
+        return;
+    }
+    
+    try {
+        const response = await fetch('/api/users/change-password/', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': 'Token ' + localStorage.getItem('auth_token'),
+                'X-CSRFToken': getCookie('csrftoken')
+            },
+            body: JSON.stringify({
+                current_password: data.current_password,
+                new_password: data.new_password
+            })
+        });
+        
+        const result = await response.json();
+        
+        if (response.ok) {
+            alert('Password changed successfully!');
+            this.reset();
+            bootstrap.Modal.getInstance(document.getElementById('changePasswordModal')).hide();
+        } else {
+            alert('Error changing password: ' + (result.error || 'Unknown error'));
+        }
+    } catch (error) {
+        alert('Error changing password: ' + error.message);
+    }
+});
+
+// Delete Account Confirmation
+document.getElementById('deleteConfirmEmail').addEventListener('input', function() {
+    const confirmBtn = document.getElementById('confirmDeleteBtn');
+    const userEmail = '{{ user.email }}';
+    
+    if (this.value === userEmail) {
+        confirmBtn.disabled = false;
+    } else {
+        confirmBtn.disabled = true;
+    }
+});
+
+document.getElementById('confirmDeleteBtn').addEventListener('click', async function() {
+    if (confirm('Are you absolutely sure you want to delete your account? This action cannot be undone.')) {
+        try {
+            const response = await fetch('/api/users/delete-account/', {
+                method: 'DELETE',
+                headers: {
+                    'Authorization': 'Token ' + localStorage.getItem('auth_token'),
+                    'X-CSRFToken': getCookie('csrftoken')
+                }
+            });
+            
+            if (response.ok) {
+                alert('Account deleted successfully. You will be redirected to the homepage.');
+                localStorage.removeItem('auth_token');
+                window.location.href = '/';
+            } else {
+                const result = await response.json();
+                alert('Error deleting account: ' + (result.error || 'Unknown error'));
+            }
+        } catch (error) {
+            alert('Error deleting account: ' + error.message);
+        }
+    }
+});
+
+// Resend Email Verification
+function resendEmailVerification() {
+    if (confirm('Send email verification link to {{ user.email }}?')) {
+        fetch('/api/users/resend-email-verification/', {
+            method: 'POST',
+            headers: {
+                'Authorization': 'Token ' + localStorage.getItem('auth_token'),
+                'X-CSRFToken': getCookie('csrftoken')
+            }
+        })
+        .then(response => response.json())
+        .then(result => {
+            if (result.success) {
+                alert('Email verification sent successfully!');
+            } else {
+                alert('Error sending verification email: ' + (result.error || 'Unknown error'));
+            }
+        })
+        .catch(error => {
+            alert('Error sending verification email: ' + error.message);
+        });
+    }
+}
+
+// CSRF Token Helper
+function getCookie(name) {
+    let cookieValue = null;
+    if (document.cookie && document.cookie !== '') {
+        const cookies = document.cookie.split(';');
+        for (let i = 0; i < cookies.length; i++) {
+            const cookie = cookies[i].trim();
+            if (cookie.substring(0, name.length + 1) === (name + '=')) {
+                cookieValue = decodeURIComponent(cookie.substring(name.length + 1));
+                break;
+            }
+        }
+    }
+    return cookieValue;
+}
+
+// Auto-refresh activity data every 30 seconds
+setInterval(function() {
+    // You can implement AJAX calls to refresh recent activity data
+    // This is optional and can be added later
+}, 30000);
+</script>
+{% endblock %}
