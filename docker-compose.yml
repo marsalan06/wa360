@@ -2,10 +2,8 @@ services:
   postgres-wa360:
     image: postgres:15
     container_name: wa360-postgres
-    environment:
-      POSTGRES_DB: ${DB_NAME}
-      POSTGRES_USER: ${DB_USER}
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    env_file:
+      - .env
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
@@ -14,9 +12,8 @@ services:
   rabbitmq:
     image: rabbitmq:3-management
     container_name: wa360-rabbitmq
-    environment:
-      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
-      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
+    env_file:
+      - .env
     ports:
       - "5672:5672"
       - "15672:15672"
@@ -37,12 +34,8 @@ services:
       - static_volume:/app/staticfiles
     ports:
       - "8000:8000"
-    environment:
-      - DEBUG=${DEBUG}
-      - DATABASE_URL=postgresql://${DB_USER}:${DB_PASSWORD}@postgres-wa360:5432/${DB_NAME}
-      - RABBITMQ_URL=${RABBITMQ_URL}
-      - D360_ENCRYPTION_KEY=${D360_ENCRYPTION_KEY}
-      - D360_WEBHOOK_URL=${D360_WEBHOOK_URL}
+    env_file:
+      - .env
     depends_on:
       - postgres-wa360
       - rabbitmq
@@ -54,12 +47,8 @@ services:
     volumes:
       # Mount source code for hot reloading
       - .:/app
-    environment:
-      - DEBUG=${DEBUG}
-      - DATABASE_URL=postgresql://${DB_USER}:${DB_PASSWORD}@postgres-wa360:5432/${DB_NAME}
-      - RABBITMQ_URL=${RABBITMQ_URL}
-      - D360_ENCRYPTION_KEY=${D360_ENCRYPTION_KEY}
-      - D360_WEBHOOK_URL=${D360_WEBHOOK_URL}
+    env_file:
+      - .env
     depends_on:
       - postgres-wa360
       - rabbitmq
@@ -73,12 +62,8 @@ services:
       - .:/app
       # Mount celery beat schedule data
       - celery_beat_data:/app/celerybeat-schedule
-    environment:
-      - DEBUG=${DEBUG}
-      - DATABASE_URL=postgresql://${DB_USER}:${DB_PASSWORD}@postgres-wa360:5432/${DB_NAME}
-      - RABBITMQ_URL=${RABBITMQ_URL}
-      - D360_ENCRYPTION_KEY=${D360_ENCRYPTION_KEY}
-      - D360_WEBHOOK_URL=${D360_WEBHOOK_URL}
+    env_file:
+      - .env
     depends_on:
       - postgres-wa360
       - rabbitmq
