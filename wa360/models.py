@@ -7,6 +7,7 @@ from django.contrib.auth.models import User
 from organizations.models import Organization
 from .crypto import enc, dec
 from .utils import summarize_conversation
+from .conversation_evaluation import ConversationStatus
 
 
 logger = logging.getLogger(__name__)
@@ -148,13 +149,19 @@ class WaIntegration(models.Model):
 
 class WaConversation(models.Model):
     """WhatsApp Conversation Model - Groups messages between a contact and integration"""
-    STATUS_CHOICES = [('open', 'Open'), ('closed', 'Closed')]
+    STATUS_CHOICES = [
+        ('open', 'Open'),
+        ('closed', 'Closed'),
+        ('continue', 'Continue - Client Engaged'),
+        ('schedule_later', 'Schedule Later - Client Postponed'),
+        ('evaluating', 'Evaluating - AI Analysis in Progress'),
+    ]
     
     integration = models.ForeignKey('WaIntegration', on_delete=models.CASCADE, related_name='conversations')
     wa_id = models.CharField(max_length=32, db_index=True, help_text="WhatsApp ID of the contact")
     started_by = models.CharField(max_length=32, blank=True, default="admin", 
                                 help_text="Who started the conversation: admin|contact|system")
-    status = models.CharField(max_length=12, choices=STATUS_CHOICES, default='open')
+    status = models.CharField(max_length=60, choices=STATUS_CHOICES, default='open')
     started_at = models.DateTimeField(auto_now_add=True)
     last_msg_at = models.DateTimeField(auto_now=True)
 
@@ -173,8 +180,8 @@ class WaConversation(models.Model):
 
     @property
     def is_open(self):
-        """Check if conversation is currently open"""
-        return self.status == 'open'
+        """Check if conversation is currently open (includes AI evaluation statuses)"""
+        return self.status in ['open', 'continue', 'schedule_later', 'evaluating']
 
     def close(self):
         """Close the conversation and update timestamp"""
@@ -182,6 +189,26 @@ class WaConversation(models.Model):
         self.status = 'closed'
         self.save(update_fields=['status', 'last_msg_at'])
         logger.info(f"✓ Conversation {self.id} closed successfully")
+    
+    def update_ai_status(self, ai_status, confidence=None, reasoning=None):
+        """Update conversation status based on AI evaluation"""
+        # Map AI status to conversation status
+        status_mapping = {
+            ConversationStatus.CONTINUE: 'continue',
+            ConversationStatus.SCHEDULE_LATER: 'schedule_later', 
+            ConversationStatus.CLOSE: 'closed'
+        }
+        
+        new_status = status_mapping.get(ai_status, 'open')
+        
+        logger.info(f"Updating conversation {self.id} status from {self.status} to {new_status} (AI: {ai_status})")
+        self.status = new_status
+        self.save(update_fields=['status', 'last_msg_at'])
+        
+        if confidence and reasoning:
+            logger.info(f"AI Evaluation - Confidence: {confidence:.2f}, Reasoning: {reasoning}")
+        
+        return new_status
 
 class LLMConfiguration(models.Model):
     """LLM Configuration for Organizations"""
