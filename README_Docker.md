@@ -66,6 +66,12 @@ docker-compose down
 
 #restart on change in ngrok
 docker-compose restart web celery celery-beat
+
+# Stop containers completely
+docker-compose down web celery celery-beat
+
+# Start them fresh  
+docker-compose up -d web celery celery-beat
 ```
 
 ## Features

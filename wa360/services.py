@@ -149,8 +149,8 @@ def format_conversation_for_llm(conversation) -> Dict[str, Any]:
         raise
 
 def get_latest_open_conversation_by_number(wa_id: str, user) -> Dict[str, Any]:
-    """Get latest open conversation by WhatsApp number"""
-    logger.info(f"=== GET LATEST OPEN CONVERSATION BY NUMBER STARTED for {wa_id} ===")
+    """Get latest conversation by WhatsApp number (including closed ones for viewing)"""
+    logger.info(f"=== GET LATEST CONVERSATION BY NUMBER STARTED for {wa_id} ===")
     
     try:
         from .utils import normalize_msisdn
@@ -162,23 +162,23 @@ def get_latest_open_conversation_by_number(wa_id: str, user) -> Dict[str, Any]:
             logger.error("Invalid phone number format")
             return {"error": "Invalid phone number format"}
         
-        # Get latest open conversation using organization-aware manager
+        # Get latest conversation (including closed ones for viewing)
         conversation = (WaConversation.objects.for_user(user)
-                       .filter(wa_id=normalized_wa_id, status='open')
+                       .filter(wa_id=normalized_wa_id)
                        .order_by('-last_msg_at').first())
         
         if not conversation:
-            logger.warning(f"No open conversation found for {normalized_wa_id}")
-            return {"error": "No open conversation found for this number"}
+            logger.warning(f"No conversation found for {normalized_wa_id}")
+            return {"error": "No conversation found for this number"}
         
-        logger.info(f"✓ Found latest open conversation: {conversation.wa_id} (ID: {conversation.id})")
+        logger.info(f"✓ Found latest conversation: {conversation.wa_id} (ID: {conversation.id}, Status: {conversation.status})")
         
         # Format conversation for LLM
         formatted_conversation = format_conversation_for_llm(conversation)
         
-        logger.info(f"✓ Latest open conversation formatted successfully")
+        logger.info(f"✓ Latest conversation formatted successfully")
         return formatted_conversation
         
     except Exception as e:
-        logger.error(f"=== GET LATEST OPEN CONVERSATION BY NUMBER FAILED for {wa_id}: {str(e)} ===")
+        logger.error(f"=== GET LATEST CONVERSATION BY NUMBER FAILED for {wa_id}: {str(e)} ===")
         return {"error": str(e)}

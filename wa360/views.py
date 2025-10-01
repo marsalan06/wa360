@@ -193,7 +193,7 @@ def webhook_360dialog(request):
                 # Find or create conversation
                 # Note: Webhook doesn't have user context, so we use the integration's organization
                 conv = (WaConversation.objects
-                        .filter(integration=integration, wa_id=from_phone, status='open')
+                        .filter(integration=integration, wa_id=from_phone, status__in=['open', 'continue', 'schedule_later', 'evaluating'])
                         .order_by('-last_msg_at').first())
                 
                 if not conv:
@@ -226,6 +226,16 @@ def webhook_360dialog(request):
                 conv.last_msg_at = timezone.now()
                 conv.save(update_fields=['last_msg_at'])
                 logger.info(f"✓ Conversation timestamp updated")
+                
+                # Trigger AI evaluation automatically when client sends a message
+                # This evaluates conversation status in real-time
+                try:
+                    from .tasks import evaluate_conversation_statuses
+                    logger.info(f"Triggering AI evaluation for conversation {conv.id}")
+                    evaluate_conversation_statuses.delay(integration.organization.id)
+                    logger.info(f"✓ AI evaluation task queued for organization {integration.organization.id}")
+                except Exception as eval_error:
+                    logger.warning(f"Failed to queue AI evaluation: {str(eval_error)}")
                 
             except Exception as msg_error:
                 logger.error(f"Failed to process message: {str(msg_error)}")
@@ -287,7 +297,7 @@ def send_text(request):
         
         # Find or create conversation using organization-aware manager
         conv = (WaConversation.objects.for_user(request.user)
-                .filter(integration=integ, wa_id=to_phone, status='open')
+                .filter(integration=integ, wa_id=to_phone, status__in=['open', 'continue', 'schedule_later', 'evaluating'])
                 .order_by('-last_msg_at').first())
         
         if not conv:
@@ -396,9 +406,11 @@ def get_conversation_by_number(request, wa_id):
         
         logger.info(f"✓ Conversation by number retrieved successfully")
         
+        # Add conversation status to the response
         return JsonResponse({
             "success": True,
-            "conversation": result
+            "conversation": result,
+            "status": result.get('status', 'open')
         })
         
     except Exception as e:
@@ -423,10 +435,10 @@ def whatsapp_chat(request):
                     'error': 'No organizations found for this user'
                 })
         
-        # Get user's conversations to extract unique phone numbers
-        conversations = WaConversation.objects.for_user(request.user).filter(status='open').order_by('-last_msg_at')
+        # Get user's conversations to extract unique phone numbers (including all statuses)
+        conversations = WaConversation.objects.for_user(request.user).order_by('-last_msg_at')
         
-        # Extract unique phone numbers from conversations
+        # Extract unique phone numbers from conversations (including closed ones)
         phone_numbers = list(conversations.values_list('wa_id', flat=True).distinct())
         
         logger.info(f"Found {len(phone_numbers)} phone numbers for user {request.user.username}")

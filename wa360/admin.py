@@ -200,8 +200,8 @@ class WaIntegrationAdmin(admin.ModelAdmin):
             conv, created = WaConversation.objects.for_user(request.user).get_or_create(
                 integration=integration, 
                 wa_id=wa_id, 
-                status='open', 
-                defaults={"started_by": "admin"}
+                status__in=['open', 'continue', 'schedule_later', 'evaluating'], 
+                defaults={"started_by": "admin", "status": "open"}
             )
             
             action = "created" if created else "found existing"
@@ -336,7 +336,7 @@ class WaIntegrationAdmin(admin.ModelAdmin):
             # Store message
             to_phone = normalize_msisdn(to_phone)
             conv = (WaConversation.objects.for_user(request.user)
-                    .filter(integration=integration, wa_id=to_phone, status='open')
+                    .filter(integration=integration, wa_id=to_phone, status__in=['open', 'continue', 'schedule_later', 'evaluating'])
                     .order_by('-last_msg_at').first())
             
             if not conv:
@@ -755,30 +755,152 @@ class LLMConfigurationAdmin(admin.ModelAdmin):
 
 @admin.register(ConversationSummary)
 class ConversationSummaryAdmin(admin.ModelAdmin):
-    list_display = ['conversation', 'message_count', 'needs_update_status', 'updated_at']
-    list_filter = ['updated_at']
+    """Admin interface for conversation summaries with AI evaluation insights"""
+    list_display = ['conversation', 'conversation_status', 'ai_evaluation_status', 'message_count', 'needs_update_status', 'updated_at']
+    list_filter = ['created_at', 'updated_at', 'conversation__status']
     search_fields = ['conversation__wa_id', 'conversation__integration__organization__name']
-    readonly_fields = ['created_at', 'updated_at', 'needs_update_status']
+    readonly_fields = ['created_at', 'updated_at', 'needs_update_status', 'ai_evaluation_status']
+    actions = ['regenerate_summary', 'force_evaluation']
     ordering = ['-updated_at']
+    
+    fieldsets = (
+        ('Summary Information', {
+            'fields': ('conversation', 'content', 'message_count')
+        }),
+        ('AI Evaluation', {
+            'fields': ('ai_evaluation_status',),
+            'classes': ('collapse',)
+        }),
+        ('Timestamps', {
+            'fields': ('created_at', 'updated_at', 'needs_update_status'),
+            'classes': ('collapse',)
+        })
+    )
     
     def get_queryset(self, request):
         """Use organization-aware manager"""
         return self.model.objects.for_user(request.user)
     
+    def conversation_status(self, obj):
+        """Show conversation status with emoji"""
+        status_emoji = {
+            'open': '🟢',
+            'continue': '💬', 
+            'schedule_later': '⏰',
+            'evaluating': '🤖',
+            'closed': '🔴'
+        }
+        emoji = status_emoji.get(obj.conversation.status, '❓')
+        return f"{emoji} {obj.conversation.get_status_display()}"
+    conversation_status.short_description = "Conv Status"
+    
+    def ai_evaluation_status(self, obj):
+        """Extract AI evaluation status from summary content"""
+        content = obj.content or ""
+        
+        # Extract status from new format
+        if "Status: ConversationStatus.CONTINUE" in content or "Status: continue" in content:
+            # Extract confidence if available
+            if "Confidence:" in content:
+                try:
+                    confidence = content.split("Confidence:")[1].split("\n")[0].strip()
+                    return f"💬 Continue (Conf: {confidence})"
+                except:
+                    return "💬 Continue - Client Engaged"
+            return "💬 Continue - Client Engaged"
+        elif "Status: ConversationStatus.SCHEDULE_LATER" in content or "Status: schedule_later" in content:
+            if "Confidence:" in content:
+                try:
+                    confidence = content.split("Confidence:")[1].split("\n")[0].strip()
+                    return f"⏰ Schedule Later (Conf: {confidence})"
+                except:
+                    return "⏰ Schedule Later - Client Postponed"
+            return "⏰ Schedule Later - Client Postponed"
+        elif "Status: ConversationStatus.CLOSE" in content or "Status: close" in content or "Status: closed" in content:
+            return "🔴 Close - Client Disinterested"
+        elif "[EVALUATION" in content:
+            return "🤖 Evaluated (Check Details)"
+        else:
+            return "📝 No AI Evaluation Yet"
+    ai_evaluation_status.short_description = "AI Evaluation"
+    
     def needs_update_status(self, obj):
         """Show if summary needs updating"""
         return "🔄 Needs Update" if obj.needs_update() else "✅ Up to Date"
     needs_update_status.short_description = "Status"
+    
+    def regenerate_summary(self, request, queryset):
+        """Regenerate summaries for selected conversations"""
+        from .tasks import evaluate_conversation_statuses
+        
+        success_count = 0
+        for summary in queryset:
+            try:
+                result = evaluate_conversation_statuses.delay(summary.conversation.integration.organization.id)
+                success_count += 1
+                self.message_user(
+                    request, 
+                    f"✅ Queued evaluation for {summary.conversation.wa_id} (Task ID: {result.id})", 
+                    level=messages.SUCCESS
+                )
+            except Exception as e:
+                self.message_user(
+                    request, 
+                    f"❌ Failed to queue evaluation for {summary.conversation.wa_id}: {str(e)}", 
+                    level=messages.ERROR
+                )
+        
+        if success_count > 0:
+            self.message_user(
+                request, 
+                f"✅ Successfully queued evaluation for {success_count} conversation(s)", 
+                level=messages.SUCCESS
+            )
+    regenerate_summary.short_description = "Regenerate AI evaluation"
+    
+    def force_evaluation(self, request, queryset):
+        """Force immediate evaluation for selected conversations"""
+        from .tasks import evaluate_conversation_statuses
+        
+        # Group by organization to avoid duplicate evaluations
+        org_ids = set()
+        for summary in queryset:
+            org_ids.add(summary.conversation.integration.organization.id)
+        
+        success_count = 0
+        for org_id in org_ids:
+            try:
+                result = evaluate_conversation_statuses.delay(org_id)
+                success_count += 1
+                self.message_user(
+                    request, 
+                    f"✅ Queued evaluation for organization {org_id} (Task ID: {result.id})", 
+                    level=messages.SUCCESS
+                )
+            except Exception as e:
+                self.message_user(
+                    request, 
+                    f"❌ Failed to queue evaluation for organization {org_id}: {str(e)}", 
+                    level=messages.ERROR
+                )
+        
+        if success_count > 0:
+            self.message_user(
+                request, 
+                f"✅ Successfully queued evaluation for {success_count} organization(s)", 
+                level=messages.SUCCESS
+            )
+    force_evaluation.short_description = "Force evaluation now"
 
 
 @admin.register(PeriodicMessageSchedule)
 class PeriodicMessageScheduleAdmin(admin.ModelAdmin):
     """Admin interface for periodic message schedules"""
-    list_display = ['organization', 'frequency', 'is_active', 'last_sent', 'next_run_time', 'created_at']
+    list_display = ['organization', 'frequency', 'is_active', 'last_sent', 'next_run_time', 'evaluation_status', 'created_at']
     list_filter = ['frequency', 'is_active', 'created_at']
     search_fields = ['organization__name']
-    readonly_fields = ['last_sent', 'created_at', 'updated_at', 'next_run_time']
-    actions = ['send_now', 'enable_schedule', 'disable_schedule', 'set_testing_mode', 'set_daily_mode']
+    readonly_fields = ['last_sent', 'created_at', 'updated_at', 'next_run_time', 'evaluation_status']
+    actions = ['send_now', 'enable_schedule', 'disable_schedule', 'set_testing_mode', 'set_daily_mode', 'evaluate_conversations', 'evaluate_all_organizations']
     
     fieldsets = (
         ('Schedule Settings', {
@@ -801,6 +923,37 @@ class PeriodicMessageScheduleAdmin(admin.ModelAdmin):
             return next_run.strftime("%Y-%m-%d %H:%M")
         return "Not scheduled"
     next_run_time.short_description = "Next Run"
+    
+    def evaluation_status(self, obj):
+        """Show conversation evaluation status for this organization"""
+        from .models import WaConversation
+        open_conversations = WaConversation.objects.filter(
+            integration__organization=obj.organization,
+            status__in=['open', 'continue', 'schedule_later', 'evaluating']
+        )
+        
+        if not open_conversations.exists():
+            return "📭 No Open Conversations"
+        
+        # Count by status
+        status_counts = {}
+        for conv in open_conversations:
+            status_counts[conv.status] = status_counts.get(conv.status, 0) + 1
+        
+        # Format status display
+        status_parts = []
+        for status, count in status_counts.items():
+            if status == 'open':
+                status_parts.append(f"🟢 Open: {count}")
+            elif status == 'continue':
+                status_parts.append(f"💬 Continue: {count}")
+            elif status == 'schedule_later':
+                status_parts.append(f"⏰ Schedule Later: {count}")
+            elif status == 'evaluating':
+                status_parts.append(f"🤖 Evaluating: {count}")
+        
+        return " | ".join(status_parts)
+    evaluation_status.short_description = "Conversation Status"
     
     def send_now(self, request, queryset):
         """Send periodic messages now for selected organizations"""
@@ -872,6 +1025,68 @@ class PeriodicMessageScheduleAdmin(admin.ModelAdmin):
             level=messages.SUCCESS
         )
     set_daily_mode.short_description = "Set to daily mode"
+    
+    def evaluate_conversations(self, request, queryset):
+        """Evaluate conversation statuses for selected organizations"""
+        from .tasks import evaluate_conversation_statuses
+        
+        success_count = 0
+        for schedule in queryset:
+            try:
+                result = evaluate_conversation_statuses.delay(schedule.organization.id)
+                success_count += 1
+                self.message_user(
+                    request, 
+                    f"✅ Queued conversation evaluation for {schedule.organization.name} (Task ID: {result.id})", 
+                    level=messages.SUCCESS
+                )
+            except Exception as e:
+                self.message_user(
+                    request, 
+                    f"❌ Failed to queue evaluation for {schedule.organization.name}: {str(e)}", 
+                    level=messages.ERROR
+                )
+        
+        if success_count > 0:
+            self.message_user(
+                request, 
+                f"✅ Successfully queued conversation evaluation for {success_count} organization(s)", 
+                level=messages.SUCCESS
+            )
+    evaluate_conversations.short_description = "Evaluate conversation statuses"
+    
+    def evaluate_all_organizations(self, request, queryset):
+        """Evaluate conversations for ALL organizations (not just selected ones)"""
+        from .tasks import evaluate_conversation_statuses
+        from .models import WaIntegration
+        
+        # Get all organizations that have integrations
+        organizations = WaIntegration.objects.values_list('organization_id', flat=True).distinct()
+        
+        success_count = 0
+        for org_id in organizations:
+            try:
+                result = evaluate_conversation_statuses.delay(org_id)
+                success_count += 1
+                self.message_user(
+                    request, 
+                    f"✅ Queued evaluation for organization {org_id} (Task ID: {result.id})", 
+                    level=messages.SUCCESS
+                )
+            except Exception as e:
+                self.message_user(
+                    request, 
+                    f"❌ Failed to queue evaluation for organization {org_id}: {str(e)}", 
+                    level=messages.ERROR
+                )
+        
+        if success_count > 0:
+            self.message_user(
+                request, 
+                f"✅ Successfully queued conversation evaluation for {success_count} organization(s)", 
+                level=messages.SUCCESS
+            )
+    evaluate_all_organizations.short_description = "Evaluate ALL organizations"
 
 # Register organization models
 admin.site.unregister(Organization)

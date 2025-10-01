@@ -80,6 +80,22 @@
         button:hover {
             background: #128C7E;
         }
+        button:disabled, input:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        button:disabled:hover {
+            background: #25D366;
+        }
+        .conversation-closed-notice {
+            background: #ff6b6b;
+            color: white;
+            padding: 15px;
+            text-align: center;
+            font-weight: bold;
+            border-radius: 5px;
+            margin: 10px;
+        }
         .phone-input {
             margin-bottom: 10px;
         }
@@ -126,6 +142,9 @@
         </div>
         
         <div id="status"></div>
+        <div id="conversationClosedNotice" style="display: none;" class="conversation-closed-notice">
+            🔒 This conversation is closed. The client is not interested or has disengaged.
+        </div>
         
         {% if error %}
         <div class="status error">{{ error }}</div>
@@ -147,6 +166,7 @@
 
     <script>
         let currentPhoneNumber = '';
+        let conversationStatus = '';
         
         function handleKeyPress(event) {
             if (event.key === 'Enter') {
@@ -199,6 +219,8 @@
             .then(data => {
                 if (data.success) {
                     displayMessages(data.conversation.messages);
+                    conversationStatus = data.status || 'open';
+                    updateInputState(conversationStatus);
                 } else {
                     showStatus('No conversation found for this number', 'error');
                 }
@@ -206,6 +228,24 @@
             .catch(error => {
                 showStatus('Error loading conversation: ' + error, 'error');
             });
+        }
+        
+        function updateInputState(status) {
+            const messageInput = document.getElementById('messageInput');
+            const sendButton = document.querySelector('button[onclick="sendMessage()"]');
+            const closedNotice = document.getElementById('conversationClosedNotice');
+            
+            if (status === 'closed') {
+                messageInput.disabled = true;
+                sendButton.disabled = true;
+                messageInput.placeholder = 'Conversation is closed';
+                closedNotice.style.display = 'block';
+            } else {
+                messageInput.disabled = false;
+                sendButton.disabled = false;
+                messageInput.placeholder = 'Type your message...';
+                closedNotice.style.display = 'none';
+            }
         }
         
         function displayMessages(messages) {
