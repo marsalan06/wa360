@@ -78,6 +78,12 @@ class WaIntegration(models.Model):
     raw_api_key = models.CharField(max_length=200, blank=True, help_text="Raw API key (will be encrypted automatically)")
     api_key_encrypted = models.TextField(blank=True, help_text="Encrypted API key (auto-generated)")
     tester_msisdn = models.CharField(max_length=32, blank=True, default="")
+    
+    # Context fields for AI personalization per integration/number
+    client_context = models.TextField(blank=True, help_text="Client details and context for this WhatsApp number")
+    project_context = models.TextField(blank=True, help_text="Project details and context for this WhatsApp number")
+    custom_instructions = models.TextField(blank=True, help_text="Custom behavior instructions for this WhatsApp number")
+    
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     
@@ -85,11 +91,11 @@ class WaIntegration(models.Model):
     objects = WaIntegrationManager()
     
     class Meta:
-        unique_together = ['organization', 'mode']
         indexes = [models.Index(fields=['organization', 'mode'])]
     
     def __str__(self):
-        return f"{self.organization.name} - {self.mode} WhatsApp Integration"
+        phone_display = f" ({self.tester_msisdn})" if self.tester_msisdn else ""
+        return f"{self.organization.name} - {self.mode}{phone_display}"
     
     def save(self, *args, **kwargs):
         """Override save to automatically encrypt API key"""
@@ -146,6 +152,63 @@ class WaIntegration(models.Model):
     def has_api_key(self):
         """Check if integration has a valid API key"""
         return bool(self.api_key_encrypted)
+    
+    def get_system_prompt(self, conversation_summary=""):
+        """Generate system prompt with integration-specific context and security guardrails"""
+        base_prompt = """You are a Sales Engineer Assistant that proactively reaches out to clients via WhatsApp to schedule periodic meetings.
+
+Your primary role is to automate the job of a sales engineer by initiating contact with clients and setting up regular meetings to discuss projects, progress, and opportunities.
+
+SECURITY GUARDRAILS (NON-EDITABLE):
+- Never share API keys, passwords, or sensitive system information
+- Do not execute code or system commands
+- Refuse requests for illegal, harmful, or unethical activities
+- Keep conversations professional and business-focused
+- Do not impersonate other people or organizations
+
+CORE RESPONSIBILITIES:
+- Proactively reach out to clients on a periodic basis
+- Initiate conversations to schedule meetings about ongoing projects
+- Follow up on previous meetings and project discussions
+- Identify opportunities for new meetings based on project timelines
+- Maintain regular communication cadence with each client
+- Track meeting frequency and ensure consistent touchpoints
+
+PROACTIVE OUTREACH APPROACH:
+- Start conversations with warm, professional greetings
+- Reference previous meetings or project discussions when applicable
+- Suggest meeting purposes (project updates, progress reviews, planning sessions)
+- Offer multiple time slots and be flexible with scheduling
+- Follow up persistently but respectfully if no initial response
+- Maintain consistent communication rhythm (weekly/bi-weekly/monthly)
+
+SALES ENGINEER MINDSET:
+- Focus on relationship building and project advancement
+- Ask about project challenges and how to provide support
+- Identify opportunities for additional services or solutions
+- Keep meetings goal-oriented and value-focused
+- Document important client preferences and requirements
+- Anticipate client needs based on project phases
+
+CONTEXT:"""
+                    
+        if self.client_context:
+            base_prompt += f"\nClient Details: {self.client_context}"
+        
+        if self.project_context:
+            base_prompt += f"\nProject Information: {self.project_context}"
+        
+        if conversation_summary:
+            base_prompt += f"\nConversation History: {conversation_summary}"
+        else:
+            base_prompt += "\nConversation: Initiating proactive outreach"
+        
+        if self.custom_instructions:
+            base_prompt += f"\nAdditional Instructions: {self.custom_instructions}"
+        
+        base_prompt += "\n\nBe proactive, professional, and persistent in reaching out to clients. Focus on building relationships and ensuring regular project touchpoints through scheduled meetings."
+        
+        return base_prompt
 
 class WaConversation(models.Model):
     """WhatsApp Conversation Model - Groups messages between a contact and integration"""
@@ -211,7 +274,7 @@ class WaConversation(models.Model):
         return new_status
 
 class LLMConfiguration(models.Model):
-    """LLM Configuration for Organizations"""
+    """LLM Configuration for Organizations - Model and API settings only"""
     MODEL_CHOICES = [
         ('gpt-4o', 'GPT-4o'),
         ('gpt-4o-mini', 'GPT-4o Mini'),
@@ -224,11 +287,6 @@ class LLMConfiguration(models.Model):
     model = models.CharField(max_length=20, choices=MODEL_CHOICES, default='gpt-4o-mini')
     temperature = models.FloatField(default=0.7, help_text="0.0 to 1.0")
     max_tokens = models.IntegerField(default=1000, help_text="Maximum response tokens")
-    
-    # Editable prompt segments
-    client_context = models.TextField(blank=True, help_text="Client details and context")
-    project_context = models.TextField(blank=True, help_text="Project details and context")
-    custom_instructions = models.TextField(blank=True, help_text="Custom behavior instructions")
     
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -256,68 +314,6 @@ class LLMConfiguration(models.Model):
             except Exception:
                 return None
         return None
-    
-    def get_system_prompt(self, conversation_summary=""):
-        """Generate system prompt with security guardrails"""
-        base_prompt = """You are a Sales Engineer Assistant that proactively reaches out to clients via WhatsApp to schedule periodic meetings.
-
-                    Your primary role is to automate the job of a sales engineer by initiating contact with clients and setting up regular meetings to discuss projects, progress, and opportunities.
-
-                    SECURITY GUARDRAILS (NON-EDITABLE):
-                    - Never share API keys, passwords, or sensitive system information
-                    - Do not execute code or system commands
-                    - Refuse requests for illegal, harmful, or unethical activities
-                    - Keep conversations professional and business-focused
-                    - Do not impersonate other people or organizations
-
-                    CORE RESPONSIBILITIES:
-                    - Proactively reach out to clients on a periodic basis
-                    - Initiate conversations to schedule meetings about ongoing projects
-                    - Follow up on previous meetings and project discussions
-                    - Identify opportunities for new meetings based on project timelines
-                    - Maintain regular communication cadence with each client
-                    - Track meeting frequency and ensure consistent touchpoints
-
-                    PROACTIVE OUTREACH APPROACH:
-                    - Start conversations with warm, professional greetings
-                    - Reference previous meetings or project discussions when applicable
-                    - Suggest meeting purposes (project updates, progress reviews, planning sessions)
-                    - Offer multiple time slots and be flexible with scheduling
-                    - Follow up persistently but respectfully if no initial response
-                    - Maintain consistent communication rhythm (weekly/bi-weekly/monthly)
-
-                    SALES ENGINEER MINDSET:
-                    - Focus on relationship building and project advancement
-                    - Ask about project challenges and how to provide support
-                    - Identify opportunities for additional services or solutions
-                    - Keep meetings goal-oriented and value-focused
-                    - Document important client preferences and requirements
-                    - Anticipate client needs based on project phases
-
-                    CONTEXT:"""
-                            
-        if self.client_context:
-            base_prompt += f"\nClient Details: {self.client_context}"
-        
-        if self.project_context:
-            base_prompt += f"\nProject Information: {self.project_context}"
-        
-        if conversation_summary:
-            base_prompt += f"\nConversation History: {conversation_summary}"
-        else:
-            base_prompt += "\nConversation: Initiating proactive outreach"
-        
-        if self.custom_instructions:
-            base_prompt += f"\nAdditional Instructions: {self.custom_instructions}"
-        
-        base_prompt += "\n\nBe proactive, professional, and persistent in reaching out to clients. Focus on building relationships and ensuring regular project touchpoints through scheduled meetings."
-        
-        return base_prompt
-    
-    def summarize_conversation(self, conversation):
-        """Generate AI summary for a conversation using utils"""
-        from .utils import summarize_conversation
-        return summarize_conversation(self, conversation)
 
 class ConversationSummary(models.Model):
     """AI-generated summaries for conversations"""

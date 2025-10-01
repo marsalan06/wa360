@@ -299,7 +299,8 @@ def send_periodic_messages(organization_id):
             # Generate AI message
             openai_manager = OpenAIManager.from_llm_config(llm_config)
             
-            system_prompt = llm_config.get_system_prompt("")
+            # Use integration's context for personalized system prompt
+            system_prompt = integration.get_system_prompt("")
             user_message = get_outreach_message_prompt()
             
             ai_message = openai_manager.chat_completion(

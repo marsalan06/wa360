@@ -24,6 +24,11 @@ class WaIntegrationAdminForm(forms.ModelForm):
     class Meta:
         model = WaIntegration
         fields = '__all__'
+        widgets = {
+            'client_context': forms.Textarea(attrs={'rows': 4, 'cols': 80}),
+            'project_context': forms.Textarea(attrs={'rows': 4, 'cols': 80}),
+            'custom_instructions': forms.Textarea(attrs={'rows': 4, 'cols': 80}),
+        }
     
     def clean(self):
         """Custom validation with graceful error handling"""
@@ -132,6 +137,11 @@ class WaIntegrationAdmin(admin.ModelAdmin):
         ('API Key Management', {
             'fields': ('raw_api_key', 'masked_api_key'),
             'description': 'Enter your raw API key in the field above. It will be automatically encrypted and stored securely.',
+            'classes': ('collapse',)
+        }),
+        ('AI Context Settings', {
+            'fields': ('client_context', 'project_context', 'custom_instructions'),
+            'description': 'These context fields personalize AI responses for this specific WhatsApp number/integration.',
             'classes': ('collapse',)
         }),
         ('Timestamps', {
@@ -677,11 +687,6 @@ class LLMConfigurationAdminForm(forms.ModelForm):
     class Meta:
         model = LLMConfiguration
         fields = '__all__'
-        widgets = {
-            'client_context': forms.Textarea(attrs={'rows': 4}),
-            'project_context': forms.Textarea(attrs={'rows': 4}),
-            'custom_instructions': forms.Textarea(attrs={'rows': 4}),
-        }
     
     def clean_temperature(self):
         temp = self.cleaned_data.get('temperature')
@@ -709,12 +714,7 @@ class LLMConfigurationAdmin(admin.ModelAdmin):
         }),
         ('OpenAI Configuration', {
             'fields': ('raw_api_key', 'model', 'temperature', 'max_tokens'),
-            'description': 'Enter your OpenAI API key. It will be encrypted automatically.'
-        }),
-        ('Context Settings', {
-            'fields': ('client_context', 'project_context', 'custom_instructions'),
-            'description': 'These fields will be included in the AI system prompt.',
-            'classes': ('collapse',)
+            'description': 'Enter your OpenAI API key. It will be encrypted automatically. Context settings have been moved to individual integrations.'
         }),
         ('Timestamps', {
             'fields': ('created_at', 'updated_at'),
