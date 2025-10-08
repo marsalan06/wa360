@@ -301,6 +301,14 @@ def reply_to_engaged_clients(organization_id):
                 skipped_count += 1
                 continue
             
+            # ANTI-LOOP PROTECTION: Re-check last message direction right before sending
+            # This prevents race conditions when multiple tasks run simultaneously
+            last_msg_check = conversation.messages.order_by('-created_at').first()
+            if not last_msg_check or last_msg_check.direction != 'in':
+                logger.info(f"Skipping conversation {conversation.id}: Another task already replied (last message is now '{last_msg_check.direction if last_msg_check else 'none'}')")
+                skipped_count += 1
+                continue
+            
             # Send reply via WhatsApp
             api_key = conversation.integration.get_api_key()
             if not api_key:

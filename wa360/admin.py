@@ -744,6 +744,14 @@ class WaConversationAdmin(admin.ModelAdmin):
                     error_count += 1
                     continue
                 
+                # ANTI-LOOP PROTECTION: Re-check last message direction right before sending
+                # This prevents race conditions when multiple tasks/actions run simultaneously
+                last_msg_check = conv.messages.order_by('-created_at').first()
+                if not last_msg_check or last_msg_check.direction != 'in':
+                    self.message_user(request, f"ℹ️ Conversation #{conv.id}: Skipped - another task already replied", level=messages.INFO)
+                    skipped_count += 1
+                    continue
+                
                 # Send reply via WhatsApp
                 api_key = conv.integration.get_api_key()
                 if not api_key:
