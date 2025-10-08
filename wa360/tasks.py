@@ -20,7 +20,7 @@ from .models import (
     PeriodicMessageSchedule
 )
 from .conversation_evaluation import create_evaluator_from_llm_config, ConversationStatus
-from .utils import summarize_conversation, get_outreach_message_prompt, OpenAIManager
+from .utils import summarize_conversation, get_outreach_message_prompt, generate_ai_reply, OpenAIManager
 from .services import send_text_sandbox
 
 # Configure logging for task monitoring
@@ -226,6 +226,16 @@ Confidence: {evaluation.confidence:.2f}
         
         logger.info(f"Conversation evaluation completed for organization {organization_id}: {evaluated_count} evaluated, {closed_count} closed, {scheduled_count} scheduled, {continue_count} continuing")
         
+        # Automatically trigger AI replies for engaged clients after evaluation
+        # This ensures clients get immediate responses when they're engaged
+        if continue_count > 0:
+            try:
+                logger.info(f"Triggering auto-reply for {continue_count} engaged conversation(s)")
+                reply_to_engaged_clients.delay(organization_id)
+                logger.info(f"✓ Auto-reply task queued for organization {organization_id}")
+            except Exception as reply_error:
+                logger.warning(f"Failed to queue auto-reply task: {str(reply_error)}")
+        
         return {
             "status": "completed",
             "organization_id": organization_id,
@@ -238,6 +248,110 @@ Confidence: {evaluation.confidence:.2f}
     except Exception as e:
         logger.error(f"Failed to evaluate conversations for organization {organization_id}: {str(e)}")
         return {"status": "error", "message": str(e)}
+
+
+@shared_task(bind=False)
+def reply_to_engaged_clients(organization_id):
+    """
+    Auto-reply to engaged clients (status='continue') who sent the last message
+    
+    Args:
+        organization_id: ID of the organization to process conversations for
+    """
+    logger.info(f"Starting auto-reply task for organization {organization_id}")
+    
+    # Get all engaged conversations where client sent the last message
+    engaged_conversations = WaConversation.objects.filter(
+        integration__organization_id=organization_id,
+        status='continue'  # Only reply to engaged clients
+    )
+    
+    if not engaged_conversations.exists():
+        logger.info(f"No engaged conversations found for organization {organization_id}")
+        return {"status": "completed", "message": f"No engaged conversations for organization {organization_id}"}
+    
+    # Get organization's LLM config
+    integration = WaIntegration.objects.filter(organization_id=organization_id).first()
+    if not integration:
+        logger.error(f"No integration found for organization {organization_id}")
+        return {"status": "error", "message": f"No integration found for organization {organization_id}"}
+    
+    llm_config = getattr(integration.organization, 'llm_config', None)
+    if not llm_config:
+        logger.error(f"No LLM config found for organization {organization_id}")
+        return {"status": "error", "message": f"No LLM config found for organization {organization_id}"}
+    
+    success_count = 0
+    skipped_count = 0
+    error_count = 0
+    
+    for conversation in engaged_conversations:
+        try:
+            # Check if client sent the last message
+            last_message = conversation.messages.order_by('-created_at').first()
+            if not last_message or last_message.direction != 'in':
+                logger.info(f"Skipping conversation {conversation.id}: Last message was not from client")
+                skipped_count += 1
+                continue
+            
+            # Generate AI reply
+            ai_reply = generate_ai_reply(llm_config, conversation)
+            if not ai_reply:
+                logger.info(f"No reply generated for conversation {conversation.id}")
+                skipped_count += 1
+                continue
+            
+            # Send reply via WhatsApp
+            api_key = conversation.integration.get_api_key()
+            if not api_key:
+                logger.error(f"No API key found for integration {conversation.integration.id}")
+                error_count += 1
+                continue
+            
+            response = send_text_sandbox(api_key, conversation.wa_id, ai_reply)
+            
+            # Save message to database
+            msg_id = ""
+            try:
+                if response and isinstance(response, dict):
+                    msg_list = response.get("messages", [])
+                    if msg_list and isinstance(msg_list, list) and len(msg_list) > 0:
+                        msg_id = str(msg_list[0].get("id", ""))
+            except Exception:
+                import uuid
+                msg_id = f"ai_reply_{uuid.uuid4().hex[:16]}"
+            
+            WaMessage.objects.create(
+                integration=conversation.integration,
+                conversation=conversation,
+                direction='out',
+                wa_id=conversation.wa_id,
+                msg_id=msg_id,
+                msg_type='text',
+                text=ai_reply,
+                payload=response
+            )
+            
+            # Update conversation timestamp
+            conversation.last_msg_at = timezone.now()
+            conversation.save(update_fields=['last_msg_at'])
+            
+            success_count += 1
+            logger.info(f"✓ Sent AI reply to conversation {conversation.id} ({conversation.wa_id})")
+            
+        except Exception as e:
+            logger.error(f"Failed to reply to conversation {conversation.id}: {str(e)}")
+            error_count += 1
+            continue
+    
+    logger.info(f"Auto-reply completed for organization {organization_id}: {success_count} sent, {skipped_count} skipped, {error_count} errors")
+    return {
+        "status": "completed",
+        "organization_id": organization_id,
+        "success_count": success_count,
+        "skipped_count": skipped_count,
+        "error_count": error_count
+    }
 
 
 @shared_task(bind=False)
@@ -370,21 +484,25 @@ def check_and_send_periodic_messages():
             should_run = next_run and (schedule.last_sent is None or current_time.replace(microsecond=0) >= next_run.replace(microsecond=0))
             logger.info(f"Schedule {schedule.organization.name}: next_run={next_run}, current_time={current_time}, last_sent={schedule.last_sent}, should_run={should_run}")
             if should_run:
-                # Re-evaluate conversation statuses before sending periodic messages
-                # Note: Real-time evaluation happens on webhook (when client replies)
-                # This scheduled evaluation catches any conversations that need periodic re-evaluation
+                # PERIODIC TASKS FLOW:
+                # 1. Re-evaluate conversations (backup in case webhook missed)
+                #    - This also triggers auto-reply for engaged clients automatically
+                # 2. Send periodic outreach to schedule_later conversations
+                
+                # Note: Primary evaluation happens on webhook (when client replies)
+                # This scheduled evaluation is a backup mechanism
                 evaluation_result = evaluate_conversation_statuses.delay(schedule.organization.id)
                 logger.info(f"Queued conversation evaluation for {schedule.organization.name} (Task ID: {evaluation_result.id})")
                 
-                # Send messages for this organization
+                # Send periodic messages for schedule_later conversations
                 result = send_periodic_messages.delay(schedule.organization.id)
+                logger.info(f"Queued periodic messages for {schedule.organization.name} (Task ID: {result.id})")
                 
                 # Update last_sent timestamp
                 schedule.last_sent = current_time
                 schedule.save(update_fields=['last_sent'])
                 
                 sent_count += 1
-                logger.info(f"Queued periodic messages for {schedule.organization.name} (Task ID: {result.id})")
             
             processed_count += 1
             

@@ -122,6 +122,26 @@ def get_outreach_message_prompt():
 
     Generate a message that feels natural and builds on the existing relationship."""
 
+def get_reply_prompt():
+    """Generate prompt for responding to engaged client messages"""
+    return """Generate a natural, helpful response to the client's latest message.
+
+    RESPONSE GUIDELINES:
+    - Keep it conversational and professional (under 300 characters)
+    - Address the client's specific question or concern
+    - Be warm and personable while staying business-focused
+    - Provide value and move the conversation forward
+    - Reference conversation context when relevant
+    - Include next steps or follow-up actions when appropriate
+    
+    TONE:
+    - Helpful and solution-oriented
+    - Professional but friendly
+    - Quick to respond and actionable
+    - Build rapport and trust
+    
+    Generate a response that feels natural and maintains engagement."""
+
 def build_conversation_text(conversation):
     """Build formatted conversation text from messages"""
     messages = conversation.messages.order_by('created_at')
@@ -175,3 +195,53 @@ def summarize_conversation(llm_config, conversation):
     except Exception as e:
         logger.error(f"Failed to summarize conversation {conversation.id}: {str(e)}")
         raise Exception(f"Summarization failed: {str(e)}")
+
+def generate_ai_reply(llm_config, conversation, recent_message_limit=5):
+    """Generate AI reply to client's message based on conversation context"""
+    try:
+        # Check if client sent the last message
+        last_message = conversation.messages.order_by('-created_at').first()
+        if not last_message or last_message.direction != 'in':
+            logger.info(f"Skipping reply for conversation {conversation.id}: Last message was not from client")
+            return None
+        
+        # Get recent messages for context
+        recent_messages = conversation.messages.order_by('-created_at')[:recent_message_limit]
+        recent_messages = list(reversed(recent_messages))  # Oldest first
+        
+        # Build conversation context
+        context_text = ""
+        for msg in recent_messages:
+            sender = "Client" if msg.direction == 'in' else "You"
+            timestamp = msg.created_at.strftime("%H:%M")
+            context_text += f"[{timestamp}] {sender}: {msg.text}\n"
+        
+        # Get conversation summary if available
+        from .models import ConversationSummary
+        summary_obj = ConversationSummary.objects.filter(conversation=conversation).first()
+        summary_context = ""
+        if summary_obj and summary_obj.content:
+            summary_context = f"\n\nPREVIOUS CONVERSATION SUMMARY:\n{summary_obj.content}\n"
+        
+        # Create OpenAI manager
+        openai_manager = OpenAIManager.from_llm_config(llm_config)
+        
+        # Get system prompt from integration with summary context
+        system_prompt = conversation.integration.get_system_prompt(summary_context)
+        
+        # Generate reply
+        user_message = f"{get_reply_prompt()}\n\nRECENT CONVERSATION:\n{context_text}\n\nGenerate a natural response to the client's latest message:"
+        
+        ai_reply = openai_manager.chat_completion(
+            system_prompt=system_prompt,
+            user_message=user_message,
+            temperature=0.7,
+            max_tokens=300
+        )
+        
+        logger.info(f"Generated AI reply for conversation {conversation.id}")
+        return ai_reply
+        
+    except Exception as e:
+        logger.error(f"Failed to generate AI reply for conversation {conversation.id}: {str(e)}")
+        raise Exception(f"AI reply generation failed: {str(e)}")

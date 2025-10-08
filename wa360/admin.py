@@ -476,7 +476,7 @@ class WaConversationAdmin(admin.ModelAdmin):
     list_filter = ['status', 'integration__mode', 'integration__organization']
     search_fields = ['wa_id', 'integration__organization__name']
     readonly_fields = ['started_at', 'last_msg_at']
-    actions = ['start_with_template', 'send_text', 'end_conversation', 'generate_summary']
+    actions = ['start_with_template', 'send_text', 'end_conversation', 'generate_summary', 'ai_reply_to_clients']
     
     def get_queryset(self, request):
         """Use organization-aware manager"""
@@ -704,6 +704,96 @@ class WaConversationAdmin(admin.ModelAdmin):
                 f"❌ Failed to generate {error_count} summaries - Check LLM configuration and API keys", 
                 level=messages.WARNING
             )
+
+    @admin.action(description="AI reply to engaged clients")
+    def ai_reply_to_clients(self, request, queryset):
+        """Generate and send AI replies to engaged clients who sent the last message"""
+        from .utils import generate_ai_reply
+        from .services import send_text_sandbox
+        
+        success_count = 0
+        skipped_count = 0
+        error_count = 0
+        
+        for conv in queryset:
+            try:
+                # Only reply to engaged conversations
+                if conv.status != 'continue':
+                    self.message_user(request, f"ℹ️ Conversation #{conv.id}: Skipped - status is '{conv.status}', not 'continue'", level=messages.INFO)
+                    skipped_count += 1
+                    continue
+                
+                # Check if client sent the last message
+                last_message = conv.messages.order_by('-created_at').first()
+                if not last_message or last_message.direction != 'in':
+                    self.message_user(request, f"ℹ️ Conversation #{conv.id}: Skipped - last message was not from client", level=messages.INFO)
+                    skipped_count += 1
+                    continue
+                
+                # Get LLM configuration
+                llm_config = getattr(conv.integration.organization, 'llm_config', None)
+                if not llm_config:
+                    self.message_user(request, f"❌ Conversation #{conv.id}: No LLM configuration found", level=messages.WARNING)
+                    error_count += 1
+                    continue
+                
+                # Generate AI reply
+                ai_reply = generate_ai_reply(llm_config, conv)
+                if not ai_reply:
+                    self.message_user(request, f"❌ Conversation #{conv.id}: Failed to generate AI reply", level=messages.WARNING)
+                    error_count += 1
+                    continue
+                
+                # Send reply via WhatsApp
+                api_key = conv.integration.get_api_key()
+                if not api_key:
+                    self.message_user(request, f"❌ Conversation #{conv.id}: No API key found for integration", level=messages.WARNING)
+                    error_count += 1
+                    continue
+                
+                response = send_text_sandbox(api_key, conv.wa_id, ai_reply)
+                
+                # Save message to database
+                msg_id = ""
+                try:
+                    if response and isinstance(response, dict):
+                        msg_list = response.get("messages", [])
+                        if msg_list and isinstance(msg_list, list) and len(msg_list) > 0:
+                            msg_id = str(msg_list[0].get("id", ""))
+                except Exception:
+                    import uuid
+                    msg_id = f"ai_reply_{uuid.uuid4().hex[:16]}"
+                
+                WaMessage.objects.create(
+                    integration=conv.integration,
+                    conversation=conv,
+                    direction='out',
+                    wa_id=conv.wa_id,
+                    msg_id=msg_id,
+                    msg_type='text',
+                    text=ai_reply,
+                    payload=response
+                )
+                
+                # Update conversation timestamp
+                conv.last_msg_at = timezone.now()
+                conv.save(update_fields=['last_msg_at'])
+                
+                self.message_user(request, f"✅ Conversation #{conv.id}: AI reply sent to {conv.wa_id}", level=messages.SUCCESS)
+                success_count += 1
+                
+            except Exception as e:
+                logger.error(f"Failed to send AI reply to conversation {conv.id}: {str(e)}")
+                self.message_user(request, f"❌ Conversation #{conv.id}: Failed - {str(e)}", level=messages.ERROR)
+                error_count += 1
+        
+        # Summary message
+        if success_count > 0:
+            self.message_user(request, f"✅ Successfully sent AI replies to {success_count} conversation(s)", level=messages.SUCCESS)
+        if skipped_count > 0:
+            self.message_user(request, f"ℹ️ Skipped {skipped_count} conversation(s)", level=messages.INFO)
+        if error_count > 0:
+            self.message_user(request, f"❌ Failed to send replies to {error_count} conversation(s)", level=messages.WARNING)
 
 # ============================================================================
 # ORGANIZATION ADMIN
@@ -961,7 +1051,7 @@ class PeriodicMessageScheduleAdmin(admin.ModelAdmin):
     list_filter = ['frequency', 'is_active', 'created_at']
     search_fields = ['organization__name']
     readonly_fields = ['last_sent', 'created_at', 'updated_at', 'next_run_time', 'evaluation_status']
-    actions = ['send_now', 'enable_schedule', 'disable_schedule', 'set_testing_mode', 'set_daily_mode', 'evaluate_conversations', 'evaluate_all_organizations']
+    actions = ['send_now', 'enable_schedule', 'disable_schedule', 'set_testing_mode', 'set_daily_mode', 'evaluate_conversations', 'evaluate_all_organizations', 'reply_to_engaged_clients_now']
     
     fieldsets = (
         ('Schedule Settings', {
@@ -1148,6 +1238,35 @@ class PeriodicMessageScheduleAdmin(admin.ModelAdmin):
                 level=messages.SUCCESS
             )
     evaluate_all_organizations.short_description = "Evaluate ALL organizations"
+    
+    def reply_to_engaged_clients_now(self, request, queryset):
+        """Send AI replies to engaged clients for selected organizations"""
+        from .tasks import reply_to_engaged_clients
+        
+        success_count = 0
+        for schedule in queryset:
+            try:
+                result = reply_to_engaged_clients.delay(schedule.organization.id)
+                success_count += 1
+                self.message_user(
+                    request, 
+                    f"✅ Queued AI auto-reply for {schedule.organization.name} (Task ID: {result.id})", 
+                    level=messages.SUCCESS
+                )
+            except Exception as e:
+                self.message_user(
+                    request, 
+                    f"❌ Failed to queue AI replies for {schedule.organization.name}: {str(e)}", 
+                    level=messages.ERROR
+                )
+        
+        if success_count > 0:
+            self.message_user(
+                request, 
+                f"✅ Successfully queued AI replies for {success_count} organization(s)", 
+                level=messages.SUCCESS
+            )
+    reply_to_engaged_clients_now.short_description = "Send AI replies to engaged clients now"
 
 # Register organization models
 admin.site.unregister(Organization)
