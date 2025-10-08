@@ -193,193 +193,219 @@ class WaIntegrationAdmin(admin.ModelAdmin):
     # Admin actions
     def create_conversation(self, request, queryset):
         """Create conversation row for tester"""
-        is_valid, error_msg = validate_single_selection(queryset, "create_conversation")
-        if not is_valid:
-            self.message_user(request, error_msg, level=messages.WARNING)
-            return
+        success_count = 0
+        error_count = 0
         
-        integration = queryset.first()
-        logger.info(f"Creating conversation for integration {integration.id}")
+        for integration in queryset:
+            logger.info(f"Creating conversation for integration {integration.id}")
+            
+            try:
+                wa_id = normalize_msisdn(integration.tester_msisdn)
+                if not wa_id:
+                    self.message_user(request, f"❌ {integration.organization.name}: No valid tester phone number found.", level=messages.WARNING)
+                    error_count += 1
+                    continue
+                
+                conv, created = WaConversation.objects.for_user(request.user).get_or_create(
+                    integration=integration, 
+                    wa_id=wa_id, 
+                    status__in=['open', 'continue', 'schedule_later', 'evaluating'], 
+                    defaults={"started_by": "admin", "status": "open"}
+                )
+                
+                action = "created" if created else "found existing"
+                self.message_user(request, f"✅ {integration.organization.name}: Conversation #{conv.id} {action} for {wa_id}", level=messages.SUCCESS)
+                success_count += 1
+                
+            except Exception as e:
+                logger.error(f"Failed to create conversation for {integration.id}: {str(e)}")
+                self.message_user(request, f"❌ {integration.organization.name}: Failed - {e}", level=messages.ERROR)
+                error_count += 1
         
-        try:
-            wa_id = normalize_msisdn(integration.tester_msisdn)
-            if not wa_id:
-                self.message_user(request, "No valid tester phone number found.", level=messages.ERROR)
-                return
-            
-            conv, created = WaConversation.objects.for_user(request.user).get_or_create(
-                integration=integration, 
-                wa_id=wa_id, 
-                status__in=['open', 'continue', 'schedule_later', 'evaluating'], 
-                defaults={"started_by": "admin", "status": "open"}
-            )
-            
-            action = "created" if created else "found existing"
-            self.message_user(request, f"Conversation #{conv.id} {action} for {wa_id}", level=messages.SUCCESS)
-            
-        except Exception as e:
-            logger.error(f"Failed to create conversation: {str(e)}")
-            self.message_user(request, f"Failed: {e}", level=messages.ERROR)
+        # Summary message
+        if success_count > 0:
+            self.message_user(request, f"✅ Successfully processed {success_count} integration(s)", level=messages.SUCCESS)
+        if error_count > 0:
+            self.message_user(request, f"❌ Failed to process {error_count} integration(s)", level=messages.WARNING)
     create_conversation.short_description = "Create conversation row for tester"
     
     def update_webhook_url(self, request, queryset):
         """Update webhook URL when ngrok URL changes"""
-        is_valid, error_msg = validate_single_selection(queryset, "update_webhook_url")
-        if not is_valid:
-            self.message_user(request, error_msg, level=messages.WARNING)
+        # Get webhook URL once (same for all integrations)
+        webhook_url, error_msg = get_webhook_url()
+        if not webhook_url:
+            self.message_user(request, error_msg, level=messages.ERROR)
             return
         
-        integration = queryset.first()
-        logger.info(f"Updating webhook for integration {integration.id}")
+        success_count = 0
+        error_count = 0
         
-        try:
-            # Get API key
-            api_key, error_msg = get_api_key_safely(integration, "update_webhook_url")
-            if not api_key:
-                self.message_user(request, error_msg, level=messages.ERROR)
-                return
+        for integration in queryset:
+            logger.info(f"Updating webhook for integration {integration.id}")
             
-            # Get webhook URL
-            webhook_url, error_msg = get_webhook_url()
-            if not webhook_url:
-                self.message_user(request, error_msg, level=messages.ERROR)
-                return
-            
-            # Update webhook
-            set_webhook_sandbox(api_key, webhook_url)
-            
-            self.message_user(
-                request, 
-                f"✅ Webhook URL updated successfully for {integration.organization.name}!\n"
-                f"New URL: {webhook_url}",
-                level=messages.SUCCESS
-            )
-            
-        except Exception as e:
-            logger.error(f"Failed to update webhook: {str(e)}")
-            self.message_user(request, f"Failed to update webhook URL: {str(e)}", level=messages.ERROR)
+            try:
+                # Get API key
+                api_key, error_msg = get_api_key_safely(integration, "update_webhook_url")
+                if not api_key:
+                    self.message_user(request, f"❌ {integration.organization.name}: {error_msg}", level=messages.WARNING)
+                    error_count += 1
+                    continue
+                
+                # Update webhook
+                set_webhook_sandbox(api_key, webhook_url)
+                
+                self.message_user(
+                    request, 
+                    f"✅ {integration.organization.name}: Webhook URL updated successfully!",
+                    level=messages.SUCCESS
+                )
+                success_count += 1
+                
+            except Exception as e:
+                logger.error(f"Failed to update webhook for {integration.id}: {str(e)}")
+                self.message_user(request, f"❌ {integration.organization.name}: Failed to update webhook - {str(e)}", level=messages.ERROR)
+                error_count += 1
+        
+        # Summary message
+        if success_count > 0:
+            self.message_user(request, f"✅ Successfully updated webhook for {success_count} integration(s) to: {webhook_url}", level=messages.SUCCESS)
+        if error_count > 0:
+            self.message_user(request, f"❌ Failed to update {error_count} integration(s)", level=messages.WARNING)
     update_webhook_url.short_description = "Update webhook URL with current ngrok URL"
     
     def connect_sandbox(self, request, queryset):
         """Connect integration to sandbox"""
-        is_valid, error_msg = validate_single_selection(queryset, "connect_sandbox")
-        if not is_valid:
-            self.message_user(request, error_msg, level=messages.WARNING)
+        # Get webhook URL once (same for all integrations)
+        webhook_url, error_msg = get_webhook_url()
+        if not webhook_url:
+            self.message_user(request, error_msg, level=messages.ERROR)
             return
         
-        integration = queryset.first()
-        logger.info(f"Connecting sandbox for integration {integration.id}")
+        success_count = 0
+        error_count = 0
         
-        try:
-            # Validate required data
-            if not integration.tester_msisdn:
-                self.message_user(request, "No tester phone found. Please set tester_msisdn field first.", level=messages.ERROR)
-                return
+        for integration in queryset:
+            logger.info(f"Connecting sandbox for integration {integration.id}")
             
-            # Get API key
-            api_key, error_msg = get_api_key_safely(integration, "connect_sandbox")
-            if not api_key:
-                self.message_user(request, error_msg, level=messages.ERROR)
-                return
-            
-            # Get webhook URL
-            webhook_url, error_msg = get_webhook_url()
-            if not webhook_url:
-                self.message_user(request, error_msg, level=messages.ERROR)
-                return
-            
-            # Set webhook
-            set_webhook_sandbox(api_key, webhook_url)
-            
-            self.message_user(request, f"Integration connected and webhook set for {integration.organization.name}!")
-            
-        except Exception as e:
-            logger.error(f"Failed to connect sandbox: {str(e)}")
-            if "401 UNAUTHORIZED" in str(e) or "API key validation failed" in str(e):
-                error_msg = (
-                    f"❌ Failed to connect integration: {str(e)}\n\n"
-                    "🔧 Troubleshooting Steps:\n"
-                    "1. Check if your 360dialog API key is correct\n"
-                    "2. Verify the API key hasn't expired\n"
-                    "3. Ensure you're using the sandbox API key\n"
-                    "4. Check API key permissions\n"
-                    "5. Try regenerating a new API key"
-                )
-                self.message_user(request, error_msg, level=messages.ERROR)
-            else:
-                self.message_user(request, f"Failed to connect integration: {str(e)}", level=messages.ERROR)
+            try:
+                # Validate required data
+                if not integration.tester_msisdn:
+                    self.message_user(request, f"❌ {integration.organization.name}: No tester phone found. Please set tester_msisdn field first.", level=messages.WARNING)
+                    error_count += 1
+                    continue
+                
+                # Get API key
+                api_key, error_msg = get_api_key_safely(integration, "connect_sandbox")
+                if not api_key:
+                    self.message_user(request, f"❌ {integration.organization.name}: {error_msg}", level=messages.WARNING)
+                    error_count += 1
+                    continue
+                
+                # Set webhook
+                set_webhook_sandbox(api_key, webhook_url)
+                
+                self.message_user(request, f"✅ {integration.organization.name}: Integration connected and webhook set!", level=messages.SUCCESS)
+                success_count += 1
+                
+            except Exception as e:
+                logger.error(f"Failed to connect sandbox for {integration.id}: {str(e)}")
+                if "401 UNAUTHORIZED" in str(e) or "API key validation failed" in str(e):
+                    error_msg = (
+                        f"❌ {integration.organization.name}: Failed to connect - {str(e)}\n"
+                        "🔧 Check: API key correct, not expired, sandbox key, has permissions"
+                    )
+                    self.message_user(request, error_msg, level=messages.ERROR)
+                else:
+                    self.message_user(request, f"❌ {integration.organization.name}: Failed to connect - {str(e)}", level=messages.ERROR)
+                error_count += 1
+        
+        # Summary message
+        if success_count > 0:
+            self.message_user(request, f"✅ Successfully connected {success_count} integration(s) to sandbox", level=messages.SUCCESS)
+        if error_count > 0:
+            self.message_user(request, f"❌ Failed to connect {error_count} integration(s)", level=messages.WARNING)
     connect_sandbox.short_description = "Connect selected integration to sandbox"
     
     def send_message(self, request, queryset):
         """Send test message"""
-        is_valid, error_msg = validate_single_selection(queryset, "send_message")
-        if not is_valid:
-            self.message_user(request, error_msg, level=messages.WARNING)
-            return
+        from datetime import datetime
+        import time
         
-        integration = queryset.first()
-        logger.info(f"Sending test message for integration {integration.id}")
+        success_count = 0
+        error_count = 0
         
-        try:
-            # Validate required data
-            if not integration.tester_msisdn:
-                self.message_user(request, "No tester phone found. Please set tester_msisdn field first.", level=messages.ERROR)
-                return
+        for integration in queryset:
+            logger.info(f"Sending test message for integration {integration.id}")
             
-            # Get API key
-            api_key, error_msg = get_api_key_safely(integration, "send_message")
-            if not api_key:
-                self.message_user(request, error_msg, level=messages.ERROR)
-                return
-            
-            # Prepare message
-            to_phone = integration.tester_msisdn
-            from datetime import datetime
-            import time
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            unique_id = int(time.time() * 1000) % 10000
-            message_text = f"Hello from Django Admin! Test message #{unique_id} sent at {timestamp}"
-            
-            # Send message
-            response = send_text_sandbox(api_key, to_phone, message_text)
-            
-            # Store message
-            to_phone = normalize_msisdn(to_phone)
-            conv = (WaConversation.objects.for_user(request.user)
-                    .filter(integration=integration, wa_id=to_phone, status__in=['open', 'continue', 'schedule_later', 'evaluating'])
-                    .order_by('-last_msg_at').first())
-            
-            if not conv:
-                conv = WaConversation.objects.create(
-                    integration=integration, 
-                    wa_id=to_phone, 
-                    started_by="admin", 
-                    status="open"
-                )
-            
-            # Extract message ID
-            msg_id = ""
             try:
-                if response and isinstance(response, dict):
-                    messages = response.get("messages", [])
-                    if messages and isinstance(messages, list) and len(messages) > 0:
-                        msg_id = str(messages[0].get("id", ""))
-            except Exception:
-                import uuid
-                msg_id = f"admin_{uuid.uuid4().hex[:16]}"
-            
-            message, error_msg = create_message_record(
-                integration, conv, 'out', to_phone, msg_id, "text", message_text, response
-            )
-            if not message:
-                self.message_user(request, f"Message sent but {error_msg}", level=messages.ERROR)
-                return
-            
-            self.message_user(request, f"Message sent successfully to {to_phone}!")
-            
-        except Exception as e:
-            logger.error(f"Failed to send message: {str(e)}")
-            self.message_user(request, f"Failed to send message: {str(e)}", level=messages.ERROR)
+                # Validate required data
+                if not integration.tester_msisdn:
+                    self.message_user(request, f"❌ {integration.organization.name}: No tester phone found. Please set tester_msisdn field first.", level=messages.WARNING)
+                    error_count += 1
+                    continue
+                
+                # Get API key
+                api_key, error_msg = get_api_key_safely(integration, "send_message")
+                if not api_key:
+                    self.message_user(request, f"❌ {integration.organization.name}: {error_msg}", level=messages.WARNING)
+                    error_count += 1
+                    continue
+                
+                # Prepare message
+                to_phone = integration.tester_msisdn
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                unique_id = int(time.time() * 1000) % 10000
+                message_text = f"Hello from Django Admin! Test message #{unique_id} sent at {timestamp}"
+                
+                # Send message
+                response = send_text_sandbox(api_key, to_phone, message_text)
+                
+                # Store message
+                to_phone = normalize_msisdn(to_phone)
+                conv = (WaConversation.objects.for_user(request.user)
+                        .filter(integration=integration, wa_id=to_phone, status__in=['open', 'continue', 'schedule_later', 'evaluating'])
+                        .order_by('-last_msg_at').first())
+                
+                if not conv:
+                    conv = WaConversation.objects.create(
+                        integration=integration, 
+                        wa_id=to_phone, 
+                        started_by="admin", 
+                        status="open"
+                    )
+                
+                # Extract message ID
+                msg_id = ""
+                try:
+                    if response and isinstance(response, dict):
+                        msg_list = response.get("messages", [])
+                        if msg_list and isinstance(msg_list, list) and len(msg_list) > 0:
+                            msg_id = str(msg_list[0].get("id", ""))
+                except Exception:
+                    import uuid
+                    msg_id = f"admin_{uuid.uuid4().hex[:16]}"
+                
+                message, error_msg = create_message_record(
+                    integration, conv, 'out', to_phone, msg_id, "text", message_text, response
+                )
+                if not message:
+                    self.message_user(request, f"❌ {integration.organization.name}: Message sent but {error_msg}", level=messages.WARNING)
+                    error_count += 1
+                    continue
+                
+                self.message_user(request, f"✅ {integration.organization.name}: Message sent successfully to {to_phone}!", level=messages.SUCCESS)
+                success_count += 1
+                
+            except Exception as e:
+                logger.error(f"Failed to send message for {integration.id}: {str(e)}")
+                self.message_user(request, f"❌ {integration.organization.name}: Failed to send message - {str(e)}", level=messages.ERROR)
+                error_count += 1
+        
+        # Summary message
+        if success_count > 0:
+            self.message_user(request, f"✅ Successfully sent test messages to {success_count} integration(s)", level=messages.SUCCESS)
+        if error_count > 0:
+            self.message_user(request, f"❌ Failed to send messages to {error_count} integration(s)", level=messages.WARNING)
     send_message.short_description = "Send test message via selected integration"
     
     
@@ -474,135 +500,168 @@ class WaConversationAdmin(admin.ModelAdmin):
     @admin.action(description="Start with template (Sandbox)")
     def start_with_template(self, request, queryset):
         """Start conversation with template message"""
-        is_valid, error_msg = validate_single_selection(queryset, "start_with_template")
-        if not is_valid:
-            self.message_user(request, error_msg, level=messages.WARNING)
-            return
+        success_count = 0
+        error_count = 0
         
-        conv = queryset.first()
-        integ = conv.integration
-        logger.info(f"Starting template conversation {conv.id}")
+        for conv in queryset:
+            integ = conv.integration
+            logger.info(f"Starting template conversation {conv.id}")
+            
+            try:
+                # Get API key
+                api_key = self._get_api_key(integ)
+                
+                # Normalize phone number
+                to_phone = normalize_msisdn(conv.wa_id or integ.tester_msisdn)
+                if not to_phone:
+                    self.message_user(request, f"❌ Conversation #{conv.id}: No valid phone number found", level=messages.WARNING)
+                    error_count += 1
+                    continue
+                
+                # Sandbox preflight guard
+                own_number = digits_only(integ.tester_msisdn)
+                dest_number = digits_only(to_phone)
+                if own_number != dest_number:
+                    self.message_user(
+                        request, 
+                        f"❌ Conversation #{conv.id}: Sandbox can only send to your own number ({own_number}), but selected is {dest_number}",
+                        level=messages.WARNING
+                    )
+                    error_count += 1
+                    continue
+                
+                # Send template
+                template_name = "disclaimer"
+                resp = send_template_sandbox(api_key, to_phone, template_name, components=[])
+                
+                # Extract message ID
+                msg_id = str(resp.get("messages", [{}])[0].get("id", "")) if isinstance(resp, dict) else ""
+                if not msg_id:
+                    import uuid
+                    msg_id = f"template_{uuid.uuid4().hex[:16]}"
+                
+                # Create message record
+                WaMessage.objects.create(
+                    integration=integ, 
+                    conversation=conv, 
+                    direction='out', 
+                    wa_id=to_phone,
+                    msg_id=msg_id, 
+                    msg_type='template', 
+                    text=f"[TEMPLATE] {template_name}", 
+                    payload=resp
+                )
+                
+                # Reopen conversation if closed
+                if not conv.is_open:
+                    conv.status = 'open'
+                    conv.save(update_fields=['status', 'last_msg_at'])
+                
+                self.message_user(request, f"✅ Conversation #{conv.id}: Template '{template_name}' sent to {to_phone}", level=messages.SUCCESS)
+                success_count += 1
+                
+            except Exception as e:
+                logger.exception(f"start_with_template failed for conversation {conv.id}")
+                self.message_user(request, f"❌ Conversation #{conv.id}: Failed to send template - {e}", level=messages.ERROR)
+                error_count += 1
         
-        try:
-            # Get API key
-            api_key = self._get_api_key(integ)
-            
-            # Normalize phone number
-            to_phone = normalize_msisdn(conv.wa_id or integ.tester_msisdn)
-            if not to_phone:
-                raise Exception("No valid phone number found")
-            
-            # Sandbox preflight guard
-            own_number = digits_only(integ.tester_msisdn)
-            dest_number = digits_only(to_phone)
-            if own_number != dest_number:
-                error_msg = f"Sandbox can only send to your own number ({own_number}). Selected conversation is {dest_number}."
-                self.message_user(request, error_msg, level=messages.ERROR)
-                return
-            
-            # Send template
-            template_name = "disclaimer"
-            resp = send_template_sandbox(api_key, to_phone, template_name, components=[])
-            
-            # Extract message ID
-            msg_id = str(resp.get("messages", [{}])[0].get("id", "")) if isinstance(resp, dict) else ""
-            if not msg_id:
-                import uuid
-                msg_id = f"template_{uuid.uuid4().hex[:16]}"
-            
-            # Create message record
-            WaMessage.objects.create(
-                integration=integ, 
-                conversation=conv, 
-                direction='out', 
-                wa_id=to_phone,
-                msg_id=msg_id, 
-                msg_type='template', 
-                text=f"[TEMPLATE] {template_name}", 
-                payload=resp
-            )
-            
-            # Reopen conversation if closed
-            if not conv.is_open:
-                conv.status = 'open'
-                conv.save(update_fields=['status', 'last_msg_at'])
-            
-            self.message_user(request, f"Template '{template_name}' sent to {to_phone}.", level=messages.SUCCESS)
-            
-        except Exception as e:
-            logger.exception("start_with_template failed")
-            self.message_user(request, f"Failed to send template: {e}", level=messages.ERROR)
+        # Summary message
+        if success_count > 0:
+            self.message_user(request, f"✅ Successfully sent templates to {success_count} conversation(s)", level=messages.SUCCESS)
+        if error_count > 0:
+            self.message_user(request, f"❌ Failed to send templates to {error_count} conversation(s)", level=messages.WARNING)
 
     @admin.action(description="Send text (append)")
     def send_text(self, request, queryset):
         """Send text message to conversation"""
-        is_valid, error_msg = validate_single_selection(queryset, "send_text")
-        if not is_valid:
-            self.message_user(request, error_msg, level=messages.WARNING)
-            return
+        # Get text from request (same for all conversations)
+        text = request.GET.get("text", "Hello from Admin!")
         
-        conv = queryset.first()
-        integ = conv.integration
-        logger.info(f"Sending text to conversation {conv.id}")
+        success_count = 0
+        error_count = 0
         
-        try:
-            # Get API key
-            api_key = self._get_api_key(integ)
+        for conv in queryset:
+            integ = conv.integration
+            logger.info(f"Sending text to conversation {conv.id}")
             
-            # Normalize phone number
-            to_phone = normalize_msisdn(conv.wa_id or integ.tester_msisdn)
-            if not to_phone:
-                raise Exception("No valid phone number found")
-            
-            # Get text from request
-            text = request.GET.get("text", "Hello from Admin!")
-            
-            # Send text message
-            resp = send_text_sandbox(api_key, to_phone, text)
-            
-            # Extract message ID
-            msg_id = str(resp.get("messages", [{}])[0].get("id", "")) if isinstance(resp, dict) else ""
-            if not msg_id:
-                import uuid
-                msg_id = f"text_{uuid.uuid4().hex[:16]}"
-            
-            # Create message record
-            WaMessage.objects.create(
-                integration=integ, 
-                conversation=conv, 
-                direction='out', 
-                wa_id=to_phone,
-                msg_id=msg_id, 
-                msg_type='text', 
-                text=text, 
-                payload=resp
-            )
-            
-            # Reopen conversation if closed
-            if not conv.is_open:
-                conv.status = 'open'
-                conv.save(update_fields=['status', 'last_msg_at'])
-            
-            self.message_user(request, f"Message sent to {to_phone}", level=messages.SUCCESS)
-            
-        except Exception as e:
-            logger.exception("send_text failed")
-            self.message_user(request, f"Failed to send text: {e}", level=messages.ERROR)
+            try:
+                # Get API key
+                api_key = self._get_api_key(integ)
+                
+                # Normalize phone number
+                to_phone = normalize_msisdn(conv.wa_id or integ.tester_msisdn)
+                if not to_phone:
+                    self.message_user(request, f"❌ Conversation #{conv.id}: No valid phone number found", level=messages.WARNING)
+                    error_count += 1
+                    continue
+                
+                # Send text message
+                resp = send_text_sandbox(api_key, to_phone, text)
+                
+                # Extract message ID
+                msg_id = str(resp.get("messages", [{}])[0].get("id", "")) if isinstance(resp, dict) else ""
+                if not msg_id:
+                    import uuid
+                    msg_id = f"text_{uuid.uuid4().hex[:16]}"
+                
+                # Create message record
+                WaMessage.objects.create(
+                    integration=integ, 
+                    conversation=conv, 
+                    direction='out', 
+                    wa_id=to_phone,
+                    msg_id=msg_id, 
+                    msg_type='text', 
+                    text=text, 
+                    payload=resp
+                )
+                
+                # Reopen conversation if closed
+                if not conv.is_open:
+                    conv.status = 'open'
+                    conv.save(update_fields=['status', 'last_msg_at'])
+                
+                self.message_user(request, f"✅ Conversation #{conv.id}: Message sent to {to_phone}", level=messages.SUCCESS)
+                success_count += 1
+                
+            except Exception as e:
+                logger.exception(f"send_text failed for conversation {conv.id}")
+                self.message_user(request, f"❌ Conversation #{conv.id}: Failed to send text - {e}", level=messages.ERROR)
+                error_count += 1
+        
+        # Summary message
+        if success_count > 0:
+            self.message_user(request, f"✅ Successfully sent messages to {success_count} conversation(s)", level=messages.SUCCESS)
+        if error_count > 0:
+            self.message_user(request, f"❌ Failed to send messages to {error_count} conversation(s)", level=messages.WARNING)
 
     @admin.action(description="End conversation")
     def end_conversation(self, request, queryset):
         """End conversations"""
-        n = 0
+        success_count = 0
+        skipped_count = 0
+        error_count = 0
+        
         for conv in queryset:
             try:
                 if conv.is_open:
                     conv.close()
-                    n += 1
+                    self.message_user(request, f"✅ Conversation #{conv.id}: Closed successfully", level=messages.SUCCESS)
+                    success_count += 1
+                else:
+                    skipped_count += 1
             except Exception as e:
                 logger.error(f"Failed to close conversation {conv.id}: {str(e)}")
-                continue
+                self.message_user(request, f"❌ Conversation #{conv.id}: Failed to close - {str(e)}", level=messages.ERROR)
+                error_count += 1
         
-        self.message_user(request, f"Closed {n} conversation(s).", level=messages.SUCCESS)
+        # Summary message
+        if success_count > 0:
+            self.message_user(request, f"✅ Successfully closed {success_count} conversation(s)", level=messages.SUCCESS)
+        if skipped_count > 0:
+            self.message_user(request, f"ℹ️ Skipped {skipped_count} already closed conversation(s)", level=messages.INFO)
+        if error_count > 0:
+            self.message_user(request, f"❌ Failed to close {error_count} conversation(s)", level=messages.WARNING)
 
     @admin.action(description="Generate AI summary")
     def generate_summary(self, request, queryset):
@@ -616,31 +675,33 @@ class WaConversationAdmin(admin.ModelAdmin):
                 llm_config = getattr(conv.integration.organization, 'llm_config', None)
                 if not llm_config:
                     logger.warning(f"No LLM configuration found for organization {conv.integration.organization.name}")
+                    self.message_user(request, f"❌ Conversation #{conv.id}: No LLM configuration found for {conv.integration.organization.name}", level=messages.WARNING)
                     error_count += 1
                     continue
                 
                 # Generate summary using utils
                 summary_content = summarize_conversation(llm_config, conv)
+                self.message_user(request, f"✅ Conversation #{conv.id}: Summary generated successfully", level=messages.SUCCESS)
                 success_count += 1
                 
                 logger.info(f"Generated summary for conversation {conv.id}")
                 
             except Exception as e:
                 logger.error(f"Failed to generate summary for conversation {conv.id}: {str(e)}")
+                self.message_user(request, f"❌ Conversation #{conv.id}: Failed to generate summary - {str(e)}", level=messages.ERROR)
                 error_count += 1
-                continue
         
+        # Summary message
         if success_count > 0:
             self.message_user(
                 request, 
-                f"✅ Generated {success_count} summaries successfully.", 
+                f"✅ Successfully generated summaries for {success_count} conversation(s)", 
                 level=messages.SUCCESS
             )
-        
         if error_count > 0:
             self.message_user(
                 request, 
-                f"❌ Failed to generate {error_count} summaries. Check LLM configuration and API keys.", 
+                f"❌ Failed to generate {error_count} summaries - Check LLM configuration and API keys", 
                 level=messages.WARNING
             )
 
