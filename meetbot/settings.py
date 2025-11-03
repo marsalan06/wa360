@@ -148,6 +148,12 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 D360_ENCRYPTION_KEY = os.getenv('D360_ENCRYPTION_KEY')
 D360_WEBHOOK_URL = os.getenv('D360_WEBHOOK_URL')
 
+# WhatsApp Meta Cloud Configuration
+FB_APP_ID = os.getenv('FB_APP_ID')
+FB_APP_SECRET = os.getenv('FB_APP_SECRET')
+FB_REDIRECT_URI = os.getenv('FB_REDIRECT_URI')
+FB_VERIFY_TOKEN = os.getenv('FB_VERIFY_TOKEN')
+
 # Logging Configuration
 LOGGING = {
     'version': 1,
@@ -192,3 +198,17 @@ CELERY_TIMEZONE = TIME_ZONE
 CELERY_BEAT_SCHEDULER = 'django_celery_beat.schedulers:DatabaseScheduler'
 
 # Celery Beat Periodic Tasks
+
+
+
+# ✅ Allow ngrok and your local dev URLs
+CSRF_TRUSTED_ORIGINS = [
+    "https://*.ngrok-free.app",  # wildcard to allow future tunnels
+]
+
+# ✅ Allow cross-site redirects (optional for OAuth callbacks)
+CORS_ALLOW_ALL_ORIGINS = True  # or use django-cors-headers for stricter control
+
+# ✅ Optional: If using CSRF cookie separately
+CSRF_COOKIE_SECURE = True
+SESSION_COOKIE_SECURE = True

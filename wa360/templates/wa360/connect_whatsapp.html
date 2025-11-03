@@ -1,0 +1,76 @@
+<html>
+  <head>
+    <title>Connect WhatsApp</title>
+    <script async defer crossorigin="anonymous" src="https://connect.facebook.net/en_US/sdk.js"></script>
+  </head>
+  <body>
+    {% if error_message %}
+      <p>{{ error_message }}</p>
+    {% endif %}
+
+    {% if not active_org %}
+      <h3>Find Your Organization</h3>
+      <p>Enter the WhatsApp number associated with your organization to continue.</p>
+      {% if lookup_error %}
+        <p>{{ lookup_error }}</p>
+      {% endif %}
+      <form method="post">
+        {% csrf_token %}
+        <label for="contact_number">WhatsApp Number</label>
+        <input
+          id="contact_number"
+          name="contact_number"
+          type="text"
+          value="{{ contact_number }}"
+          placeholder="e.g. +14155552671"
+          required
+        />
+        <button type="submit">Continue</button>
+      </form>
+      <p style="margin-top:1rem;">
+        Need to set up an organization first? Visit the
+        <a href="/admin/organizations/organization/" target="_blank">admin panel</a>.
+      </p>
+    {% else %}
+      <h3>Connect WhatsApp for {{ active_org.name }}</h3>
+      <button type="button" onclick="launchWhatsAppSignup()">Connect WhatsApp</button>
+
+      <script>
+        window.fbAsyncInit = function () {
+          console.log("Initializing FB SDK with:", {
+            appId: "{{ fb_app_id }}",
+            version: "v22.0"
+          });
+          FB.init({
+            appId: "{{ fb_app_id }}",
+            cookie: true,
+            xfbml: true,
+            version: "v22.0"
+          });
+          console.log("✅ FB SDK initialized");
+        };
+
+        function launchWhatsAppSignup() {
+          FB.login(function (response) {
+            console.log("Meta login response:", response);
+            if (response && response.authResponse) {
+              const { code, accessToken } = response.authResponse;
+              if (code) {
+                window.location.href = "{{ fb_callback_url }}?code=" + encodeURIComponent(code);
+              } else if (accessToken) {
+                window.location.href = "{{ fb_callback_url }}?access_token=" + encodeURIComponent(accessToken);
+              } else {
+                alert("Login succeeded but no authorization code or access token was returned. Please try again.");
+              }
+            } else {
+              alert("Login failed or was cancelled by the user.");
+            }
+          }, {
+            scope: "whatsapp_business_management,whatsapp_business_messaging,business_management"
+          });
+        }
+      </script>
+    {% endif %}
+  </body>
+</html>
+

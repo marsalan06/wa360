@@ -124,9 +124,20 @@ def create_message_record(integration, conversation, direction, wa_id, msg_id, m
 @admin.register(WaIntegration)
 class WaIntegrationAdmin(admin.ModelAdmin):
     form = WaIntegrationAdminForm
-    list_display = ['organization', 'mode', 'tester_msisdn', 'masked_api_key', 'api_key_status', 'message_count', 'created_at']
+    list_display = [
+        'organization',
+        'mode',
+        'tester_msisdn',
+        'meta_phone_number_display',
+        'meta_phone_number_id_display',
+        'meta_waba_id_display',
+        'masked_api_key',
+        'api_key_status',
+        'message_count',
+        'created_at',
+    ]
     list_filter = ['mode', 'created_at']
-    search_fields = ['organization__name', 'tester_msisdn']
+    search_fields = ['organization__name', 'tester_msisdn', 'meta_phone_number', 'meta_phone_number_id', 'meta_waba_id']
     ordering = ['-created_at']
     actions = ['connect_sandbox', 'send_message', 'update_webhook_url', 'create_conversation']
     
@@ -137,6 +148,11 @@ class WaIntegrationAdmin(admin.ModelAdmin):
         ('API Key Management', {
             'fields': ('raw_api_key', 'masked_api_key'),
             'description': 'Enter your raw API key in the field above. It will be automatically encrypted and stored securely.',
+            'classes': ('collapse',)
+        }),
+        ('Meta WhatsApp Cloud', {
+            'fields': ('meta_phone_number', 'meta_phone_number_id', 'meta_waba_id'),
+            'description': 'Auto-populated after Meta embedded signup completes.',
             'classes': ('collapse',)
         }),
         ('AI Context Settings', {
@@ -165,7 +181,9 @@ class WaIntegrationAdmin(admin.ModelAdmin):
     
     def get_readonly_fields(self, request, obj=None):
         """Make fields readonly based on context"""
-        return ['created_at', 'updated_at', 'masked_api_key']
+        readonly = ['created_at', 'updated_at', 'masked_api_key']
+        readonly.extend(['meta_phone_number', 'meta_phone_number_id', 'meta_waba_id'])
+        return readonly
     
     # Display methods
     def masked_api_key(self, obj):
@@ -184,6 +202,21 @@ class WaIntegrationAdmin(admin.ModelAdmin):
     api_key_status.short_description = "Status"
     api_key_status.admin_order_field = 'api_key_encrypted'
     
+    def meta_phone_number_display(self, obj):
+        return obj.meta_phone_number or "—"
+    meta_phone_number_display.short_description = "Meta Phone"
+    meta_phone_number_display.admin_order_field = 'meta_phone_number'
+
+    def meta_phone_number_id_display(self, obj):
+        return obj.meta_phone_number_id or "—"
+    meta_phone_number_id_display.short_description = "Meta Phone ID"
+    meta_phone_number_id_display.admin_order_field = 'meta_phone_number_id'
+
+    def meta_waba_id_display(self, obj):
+        return obj.meta_waba_id or "—"
+    meta_waba_id_display.short_description = "Meta WABA ID"
+    meta_waba_id_display.admin_order_field = 'meta_waba_id'
+
     def message_count(self, obj):
         count = obj.messages.count()
         return f"{count} message{'s' if count != 1 else ''}"

@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Create WhatsApp Integration</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        line-height: 1.6;
+        max-width: 720px;
+        margin: 2rem auto;
+        padding: 0 1.5rem;
+        color: #222;
+      }
+      h1 {
+        font-size: 1.8rem;
+      }
+      ol {
+        padding-left: 1.4rem;
+      }
+      a {
+        color: #0b69c7;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Set Up Your WhatsApp Integration</h1>
+    <p>
+      We couldn’t find an existing integration for the WhatsApp number you entered. To
+      continue, please complete the following steps:
+    </p>
+    <ol>
+      <li>
+        <strong>Create the organization</strong> (if it doesn’t exist yet) in the
+        <a href="/admin/organizations/organization/" target="_blank">Django admin</a>.
+      </li>
+      <li>
+        <strong>Add a WhatsApp integration</strong> for that organization via
+        <a href="/admin/wa360/waintegration/add/" target="_blank">Admin → WA360 → Integrations</a>.
+        Enter the WhatsApp number in the <code>tester_msisdn</code> field (or use the
+        Meta fields after signup).
+      </li>
+      <li>
+        Return to the
+        <a href="/wa360/meta/connect">Connect WhatsApp</a>
+        page and try the embedded signup again.
+      </li>
+    </ol>
+    <p>
+      Need help? Contact your platform administrator or email
+      <a href="mailto:support@example.com">support@example.com</a>.
+    </p>
+  </body>
+</html>
+

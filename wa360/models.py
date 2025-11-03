@@ -71,13 +71,22 @@ class WaMessageManager(OrganizationAwareManager):
 
 class WaIntegration(models.Model):
     """WhatsApp Integration Model"""
-    MODE_CHOICES = [('sandbox', 'Sandbox'), ('prod', 'Production')]
+    MODE_CHOICES = [
+        ('sandbox', 'Sandbox'),
+        ('prod', 'Production'),
+        ('meta', 'Meta Cloud'),
+    ]
     
     organization = models.ForeignKey(Organization, on_delete=models.CASCADE, related_name="wa_integrations")
     mode = models.CharField(max_length=16, choices=MODE_CHOICES, default="sandbox")
     raw_api_key = models.CharField(max_length=200, blank=True, help_text="Raw API key (will be encrypted automatically)")
     api_key_encrypted = models.TextField(blank=True, help_text="Encrypted API key (auto-generated)")
     tester_msisdn = models.CharField(max_length=32, blank=True, default="")
+
+    # Meta WhatsApp Cloud phone mapping (tokens stay in env)
+    meta_waba_id = models.CharField(max_length=64, blank=True, default="")
+    meta_phone_number_id = models.CharField(max_length=64, blank=True, default="")
+    meta_phone_number = models.CharField(max_length=32, blank=True, default="")
     
     # Context fields for AI personalization per integration/number
     client_context = models.TextField(blank=True, help_text="Client details and context for this WhatsApp number")
@@ -94,7 +103,11 @@ class WaIntegration(models.Model):
         indexes = [models.Index(fields=['organization', 'mode'])]
     
     def __str__(self):
-        phone_display = f" ({self.tester_msisdn})" if self.tester_msisdn else ""
+        phone_display = ""
+        if self.mode == 'meta' and self.meta_phone_number:
+            phone_display = f" ({self.meta_phone_number})"
+        elif self.tester_msisdn:
+            phone_display = f" ({self.tester_msisdn})"
         return f"{self.organization.name} - {self.mode}{phone_display}"
     
     def save(self, *args, **kwargs):
@@ -152,6 +165,7 @@ class WaIntegration(models.Model):
     def has_api_key(self):
         """Check if integration has a valid API key"""
         return bool(self.api_key_encrypted)
+
     
     def get_system_prompt(self, conversation_summary=""):
         """Generate system prompt with integration-specific context and security guardrails"""

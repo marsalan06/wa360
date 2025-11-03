@@ -4,18 +4,29 @@ Handles API endpoints for integration, webhooks, and messaging
 """
 import json
 import logging
+
+import requests
 from django.views.decorators.csrf import csrf_exempt
 from django.contrib.auth.decorators import login_required
 from django.http import JsonResponse, HttpResponse, HttpResponseBadRequest
-from django.shortcuts import render
+from django.shortcuts import render, redirect
 from django.conf import settings
 from django.utils import timezone
+from django.db import models
 
 from organizations.models import Organization
 from .models import WaIntegration, WaMessage, WaConversation
 from .crypto import enc, dec
 from .services import set_webhook_sandbox, send_text_sandbox, format_conversation_for_llm, get_latest_open_conversation_by_number
-from .utils import normalize_msisdn
+from .utils import (
+    normalize_msisdn,
+    get_meta_app_config,
+    render_meta_connect,
+    resolve_meta_access_token,
+    fetch_primary_waba,
+    fetch_primary_phone_number,
+    upsert_meta_integration,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -453,3 +464,190 @@ def whatsapp_chat(request):
             'phone_numbers': [],
             'error': str(e)
         })
+
+
+def privacy_policy(request):
+    """Render public privacy policy page."""
+    return render(request, "wa360/privacy_policy.html", {})
+
+
+def create_integration_instructions(request):
+    """Show help on how to create a WhatsApp integration before signup."""
+    return render(request, "wa360/create_integration.html", {})
+
+
+@login_required(login_url="/admin/login/")
+def connect_whatsapp_meta(request):
+    """Render embedded signup launcher for Meta WhatsApp onboarding."""
+    fb_app_id, _, fb_redirect_uri = get_meta_app_config()
+
+    if not fb_app_id or not fb_redirect_uri:
+        return render_meta_connect(
+            request,
+            "Facebook app is not configured. Please set FB_APP_ID and FB_REDIRECT_URI.",
+        )
+
+    active_org = None
+    active_org_id = request.session.get("active_org_id")
+    if active_org_id:
+        active_org = Organization.objects.filter(pk=active_org_id).first()
+
+    lookup_error = None
+
+    if request.method == "POST":
+        input_number = request.POST.get("contact_number", "").strip()
+        normalized_number = normalize_msisdn(input_number)
+
+        candidate_numbers = {value for value in [input_number, normalized_number] if value}
+        candidate_numbers.update({
+            normalized_number.lstrip("+") if normalized_number else "",
+            f"+{normalized_number}" if normalized_number and not normalized_number.startswith("+") else "",
+        })
+        candidate_numbers = {num for num in candidate_numbers if num}
+
+        integration = None
+        if candidate_numbers:
+            integration = (
+                WaIntegration.objects.select_related("organization")
+                .filter(mode__in=["sandbox", "meta"])
+                .filter(
+                    models.Q(tester_msisdn__in=candidate_numbers)
+                    | models.Q(meta_phone_number__in=candidate_numbers)
+                )
+                .first()
+            )
+
+        if integration:
+            request.session["active_org_id"] = integration.organization_id
+            active_org = integration.organization
+        else:
+            lookup_error = (
+                "No integration found for that WhatsApp number. "
+                "Please create it first or ask an administrator to add the number."
+            )
+            return redirect("create_integration_instructions")
+
+    context = {
+        "fb_app_id": fb_app_id,
+        "fb_callback_url": fb_redirect_uri,
+        "active_org": active_org,
+        "lookup_error": lookup_error,
+        "contact_number": request.POST.get("contact_number", "") if request.method == "POST" else "",
+    }
+
+    return render(request, "wa360/connect_whatsapp.html", context)
+
+
+def whatsapp_meta_callback(request):
+    """Handle Meta embedded signup callback and store integration credentials."""
+    if request.method != "GET":
+        return HttpResponseBadRequest("GET only")
+
+    logger.info(
+        "Meta callback invoked for user=%s params=%s",
+        request.user,
+        request.GET.dict(),
+    )
+
+    if request.GET.get("hub.mode") == "subscribe":
+        logger.info(
+            "===== META WEBHOOK VERIFICATION ATTEMPT ===== params=%s",
+            request.GET.dict(),
+        )
+        verify_token = request.GET.get("hub.verify_token")
+        challenge = request.GET.get("hub.challenge")
+        expected_token = getattr(settings, "FB_VERIFY_TOKEN", None)
+
+        if verify_token and expected_token and verify_token == expected_token:
+            logger.info("Meta webhook verification succeeded (challenge=%s)", challenge)
+            return HttpResponse(challenge or "", status=200)
+
+        logger.warning(
+            "Meta webhook verification failed: provided=%s expected=%s",
+            verify_token,
+            expected_token,
+        )
+        return HttpResponse("Invalid verify token", status=403)
+
+    fb_app_id, fb_app_secret, fb_redirect_uri = get_meta_app_config()
+
+    if not fb_app_id or not fb_app_secret or not fb_redirect_uri:
+        logger.error(
+            "Meta app config missing: app_id=%s secret=%s redirect=%s",
+            bool(fb_app_id),
+            bool(fb_app_secret),
+            bool(fb_redirect_uri),
+        )
+        return render_meta_connect(
+            request,
+            "Facebook app is not configured. Please set FB_APP_ID, FB_APP_SECRET, and FB_REDIRECT_URI.",
+        )
+
+    error = request.GET.get("error")
+    if error:
+        logger.warning("Meta callback received error param: %s", error)
+        return render_meta_connect(
+            request,
+            f"Facebook returned an error: {error}",
+        )
+
+    code = request.GET.get("code")
+    incoming_access_token = request.GET.get("access_token")
+    if not code and not incoming_access_token:
+        logger.warning("Meta callback missing code/access_token. Params=%s", request.GET.dict())
+        return render_meta_connect(
+            request,
+            "Missing authorization response from Facebook.",
+        )
+
+    try:
+        org = _active_org(request)
+    except Exception as exc:
+        logger.error("Failed to determine active org during Meta callback: %s", exc, exc_info=True)
+        return render_meta_connect(
+            request,
+            f"Unable to determine active organization: {exc}",
+        )
+
+    try:
+        access_token = resolve_meta_access_token(
+            code,
+            incoming_access_token,
+            fb_app_id,
+            fb_app_secret,
+            fb_redirect_uri,
+        )
+        logger.info(
+            "Resolved Meta access token for org %s (token len=%s)",
+            org.id,
+            len(access_token) if access_token else 0,
+        )
+
+        waba_id = fetch_primary_waba(access_token)
+        logger.info("Fetched WABA ID '%s' for org %s", waba_id, org.id)
+
+        phone_number_id, display_phone = fetch_primary_phone_number(waba_id, access_token)
+        logger.info(
+            "Fetched phone number id='%s' display='%s' for org %s",
+            phone_number_id,
+            display_phone,
+            org.id,
+        )
+
+        upsert_meta_integration(org, waba_id, phone_number_id, display_phone)
+        logger.info("Upserted Meta integration for org %s", org.id)
+
+        return redirect("whatsapp_chat")
+
+    except requests.exceptions.RequestException as req_error:
+        logger.error("Meta callback request failed: %s", req_error, exc_info=True)
+        return render_meta_connect(
+            request,
+            f"Failed to communicate with Facebook: {req_error}",
+        )
+    except Exception as exc:
+        logger.error("Meta callback processing failed: %s", exc, exc_info=True)
+        return render_meta_connect(
+            request,
+            str(exc),
+        )
