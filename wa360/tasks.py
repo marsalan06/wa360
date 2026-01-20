@@ -1,5 +1,5 @@
 """
-Celery tasks for WhatsApp 360dialog integration
+Celery tasks for WhatsApp integration
 Simple periodic messaging system with intelligent conversation evaluation
 """
 import logging
@@ -21,7 +21,6 @@ from .models import (
 )
 from .conversation_evaluation import create_evaluator_from_llm_config, ConversationStatus
 from .utils import summarize_conversation, get_outreach_message_prompt, generate_ai_reply, OpenAIManager
-from .services import send_text_sandbox
 
 # Configure logging for task monitoring
 logger = logging.getLogger(__name__)
@@ -310,13 +309,12 @@ def reply_to_engaged_clients(organization_id):
                 continue
             
             # Send reply via WhatsApp
-            api_key = conversation.integration.get_api_key()
-            if not api_key:
-                logger.error(f"No API key found for integration {conversation.integration.id}")
-                error_count += 1
-                continue
+            # TODO: Replace with Waha send message function
+            logger.error("Message sending not implemented - waiting for Waha integration")
+            error_count += 1
+            continue
             
-            response = send_text_sandbox(api_key, conversation.wa_id, ai_reply)
+            # response = send_text_waha(session_id, conversation.wa_id, ai_reply)
             
             # Save message to database
             msg_id = ""
@@ -433,8 +431,12 @@ def send_periodic_messages(organization_id):
             )
             
             # Send message via WhatsApp
-            api_key = integration.get_api_key()  # Use WhatsApp API key, not OpenAI API key
-            response = send_text_sandbox(api_key, latest_conversation.wa_id, ai_message)
+            # TODO: Replace with Waha send message function
+            logger.error("Message sending not implemented - waiting for Waha integration")
+            error_count += 1
+            continue
+            
+            # response = send_text_waha(integration.waha_session_id, latest_conversation.wa_id, ai_message)
             
             # Save message to database linked to conversation
             WaMessage.objects.create(

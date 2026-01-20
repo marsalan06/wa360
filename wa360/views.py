@@ -1,32 +1,20 @@
 """
-WhatsApp 360dialog Views
+WhatsApp Views
 Handles API endpoints for integration, webhooks, and messaging
 """
 import json
 import logging
 
-import requests
 from django.views.decorators.csrf import csrf_exempt
 from django.contrib.auth.decorators import login_required
 from django.http import JsonResponse, HttpResponse, HttpResponseBadRequest
-from django.shortcuts import render, redirect
-from django.conf import settings
+from django.shortcuts import render
 from django.utils import timezone
-from django.db import models
 
 from organizations.models import Organization
 from .models import WaIntegration, WaMessage, WaConversation
-from .crypto import enc, dec
-from .services import set_webhook_sandbox, send_text_sandbox, format_conversation_for_llm, get_latest_open_conversation_by_number
-from .utils import (
-    normalize_msisdn,
-    get_meta_app_config,
-    render_meta_connect,
-    resolve_meta_access_token,
-    fetch_primary_waba,
-    fetch_primary_phone_number,
-    upsert_meta_integration,
-)
+from .services import format_conversation_for_llm, get_latest_open_conversation_by_number
+from .utils import normalize_msisdn
 
 logger = logging.getLogger(__name__)
 
@@ -45,219 +33,6 @@ def _active_org(request) -> Organization:
     except Exception as e:
         logger.error(f"Failed to get active organization: {str(e)}")
         raise
-
-@login_required
-@csrf_exempt
-def connect_sandbox(request):
-    """Connect sandbox: save API key, set webhook, create integration"""
-    logger.info("=== CONNECT SANDBOX VIEW STARTED ===")
-    
-    try:
-        if request.method != "POST":
-            logger.warning("Invalid method: %s, expected POST", request.method)
-            return HttpResponseBadRequest("POST only")
-        
-        logger.info("Step 1: Parsing request body...")
-        body = json.loads(request.body.decode())
-        api_key = body.get("api_key")
-        tester = body.get("tester_msisdn")
-        
-        logger.info(f"Request data - API Key length: {len(api_key) if api_key else 0}, Tester: {tester}")
-        
-        if not api_key or not tester:
-            logger.error("Missing required fields: api_key=%s, tester_msisdn=%s", bool(api_key), bool(tester))
-            return HttpResponseBadRequest("api_key & tester_msisdn required")
-        
-        logger.info(f"Step 2: Getting active organization...")
-        org = _active_org(request)
-        logger.info(f"✓ Organization: {org.name} (ID: {org.id})")
-        
-        logger.info(f"Step 3: Setting webhook...")
-        try:
-            webhook_url = getattr(settings, 'D360_WEBHOOK_URL', None)
-            if not webhook_url:
-                logger.error("D360_WEBHOOK_URL not set in settings")
-                return JsonResponse({"error": "D360_WEBHOOK_URL not configured"}, status=500)
-            
-            logger.info(f"Webhook URL: {webhook_url}")
-            set_webhook_sandbox(api_key, webhook_url)
-            logger.info("✓ Webhook set successfully")
-        except Exception as webhook_error:
-            logger.error(f"Failed to set webhook: {str(webhook_error)}")
-            return JsonResponse({"error": f"Webhook setup failed: {str(webhook_error)}"}, status=500)
-        
-        logger.info(f"Step 4: Creating/updating integration...")
-        integ, created = WaIntegration.objects.update_or_create(
-            organization=org,
-            mode="sandbox",
-            defaults={
-                "raw_api_key": api_key,
-                "tester_msisdn": tester
-            }
-        )
-        
-        action = "created" if created else "updated"
-        logger.info(f"✓ Integration {action}: ID {integ.id}")
-        
-        logger.info("=== CONNECT SANDBOX VIEW COMPLETED SUCCESSFULLY ===")
-        return JsonResponse({
-            "success": True,
-            "message": f"Integration {action} successfully",
-            "integration_id": integ.id
-        })
-        
-    except Exception as e:
-        logger.error(f"=== CONNECT SANDBOX VIEW FAILED: {str(e)} ===")
-        return JsonResponse({"error": str(e)}, status=500)
-
-@csrf_exempt
-def webhook_360dialog(request):
-    """Handle incoming webhooks from 360dialog"""
-    logger.info("=== WEBHOOK PROCESSING STARTED ===")
-    
-    try:
-        if request.method != "POST":
-            logger.warning("Invalid method: %s, expected POST", request.method)
-            return HttpResponse(status=405)
-        
-        logger.info("Step 1: Parsing webhook body...")
-        body = json.loads(request.body.decode())
-        logger.info(f"Webhook body: {body}")
-        
-        # Extract message data
-        entry = body.get("entry", [{}])[0]
-        changes = entry.get("changes", [{}])[0]
-        value = changes.get("value", {})
-        messages = value.get("messages", [])
-        
-        if not messages:
-            logger.info("No messages in webhook, ignoring")
-            return HttpResponse(status=200)
-        
-        logger.info(f"Step 2: Processing {len(messages)} message(s)...")
-        
-        for msg_data in messages:
-            try:
-                logger.info(f"Processing message: {msg_data}")
-                
-                # Extract message details
-                msg_id = msg_data.get("id", "")
-                from_phone = msg_data.get("from", "")
-                msg_type = msg_data.get("type", "text")
-                timestamp = msg_data.get("timestamp", "")
-                
-                # Get text content
-                text = ""
-                if msg_type == "text":
-                    text = msg_data.get("text", {}).get("body", "")
-                elif msg_type == "image":
-                    text = f"[Image: {msg_data.get('image', {}).get('id', 'unknown')}]"
-                elif msg_type == "audio":
-                    text = f"[Audio: {msg_data.get('audio', {}).get('id', 'unknown')}]"
-                elif msg_type == "video":
-                    text = f"[Video: {msg_data.get('video', {}).get('id', 'unknown')}]"
-                elif msg_type == "template":
-                    text = f"[Template: {msg_data.get('template', {}).get('name', 'unknown')}]"
-                else:
-                    text = f"[{msg_type.title()}: {msg_data.get(msg_type, {}).get('id', 'unknown')}]"
-                
-                logger.info(f"Message details - ID: {msg_id}, From: {from_phone}, Type: {msg_type}, Text: {text[:50]}...")
-                
-                # Normalize phone number first
-                from_phone = normalize_msisdn(from_phone)
-                if not from_phone:
-                    logger.error("Invalid phone number format")
-                    continue
-                
-                # Find integration by matching the incoming phone number with tester_msisdn
-                # Try different phone number formats to find the correct integration
-                integration = None
-                
-                # Try exact match first
-                integration = WaIntegration.objects.filter(
-                    mode="sandbox", 
-                    tester_msisdn=from_phone
-                ).first()
-                
-                # If not found, try without + prefix
-                if not integration:
-                    from_phone_no_plus = from_phone.lstrip('+') if from_phone.startswith('+') else from_phone
-                    integration = WaIntegration.objects.filter(
-                        mode="sandbox", 
-                        tester_msisdn=from_phone_no_plus
-                    ).first()
-                
-                # If still not found, try with + prefix
-                if not integration and not from_phone.startswith('+'):
-                    from_phone_with_plus = '+' + from_phone
-                    integration = WaIntegration.objects.filter(
-                        mode="sandbox", 
-                        tester_msisdn=from_phone_with_plus
-                    ).first()
-                
-                if not integration:
-                    logger.warning(f"No integration found for incoming phone: {from_phone}")
-                    continue
-                
-                logger.info(f"✓ Found integration: {integration.organization.name} (ID: {integration.id}) for phone: {from_phone}")
-                
-                # Find or create conversation
-                # Note: Webhook doesn't have user context, so we use the integration's organization
-                conv = (WaConversation.objects
-                        .filter(integration=integration, wa_id=from_phone, status__in=['open', 'continue', 'schedule_later', 'evaluating'])
-                        .order_by('-last_msg_at').first())
-                
-                if not conv:
-                    logger.info(f"Creating new conversation for {from_phone}")
-                    conv = WaConversation.objects.create(
-                        integration=integration, 
-                        wa_id=from_phone, 
-                        started_by="contact", 
-                        status="open"
-                    )
-                    logger.info(f"✓ New conversation created: ID {conv.id}")
-                else:
-                    logger.info(f"✓ Using existing conversation: ID {conv.id}")
-                
-                # Create message record
-                message = WaMessage.objects.create(
-                    integration=integration,
-                    conversation=conv,
-                    direction='in',
-                    wa_id=from_phone,
-                    msg_id=msg_id,
-                    msg_type=msg_type,
-                    text=text,
-                    payload=msg_data
-                )
-                
-                logger.info(f"✓ Message stored: ID {message.id}")
-                
-                # Update conversation timestamp
-                conv.last_msg_at = timezone.now()
-                conv.save(update_fields=['last_msg_at'])
-                logger.info(f"✓ Conversation timestamp updated")
-                
-                # Trigger AI evaluation automatically when client sends a message
-                # This evaluates conversation status in real-time
-                try:
-                    from .tasks import evaluate_conversation_statuses
-                    logger.info(f"Triggering AI evaluation for conversation {conv.id}")
-                    evaluate_conversation_statuses.delay(integration.organization.id)
-                    logger.info(f"✓ AI evaluation task queued for organization {integration.organization.id}")
-                except Exception as eval_error:
-                    logger.warning(f"Failed to queue AI evaluation: {str(eval_error)}")
-                
-            except Exception as msg_error:
-                logger.error(f"Failed to process message: {str(msg_error)}")
-                continue
-        
-        logger.info("=== WEBHOOK PROCESSING COMPLETED SUCCESSFULLY ===")
-        return HttpResponse(status=200)
-        
-    except Exception as e:
-        logger.error(f"=== WEBHOOK PROCESSING FAILED: {str(e)} ===")
-        return HttpResponse(status=200)  # Always return 200 to avoid retries
 
 @login_required
 @csrf_exempt
@@ -291,11 +66,11 @@ def send_text(request):
         
         logger.info(f"Step 3: Finding integration...")
         # Use organization-aware manager
-        integ = WaIntegration.objects.for_user(request.user).filter(organization=org, mode="sandbox").first()
+        integ = WaIntegration.objects.for_user(request.user).filter(organization=org).first()
         
         if not integ:
-            logger.error("No sandbox integration found for organization")
-            return HttpResponseBadRequest("Sandbox not connected")
+            logger.error("No integration found for organization")
+            return HttpResponseBadRequest("Integration not connected")
         
         logger.info(f"✓ Found integration: ID {integ.id}")
         
@@ -324,12 +99,9 @@ def send_text(request):
             logger.info(f"✓ Using existing conversation: ID {conv.id}")
         
         logger.info(f"Step 5: Sending message...")
-        try:
-            response = send_text_sandbox(integ.get_api_key(), to_phone, text)
-            logger.info(f"✓ Message sent successfully, API response: {response}")
-        except Exception as send_error:
-            logger.error(f"Failed to send message: {str(send_error)}")
-            return JsonResponse({"error": f"Failed to send message: {str(send_error)}"}, status=500)
+        # TODO: Replace with Waha send message function
+        logger.error("Message sending not implemented - waiting for Waha integration")
+        return JsonResponse({"error": "Message sending not implemented - waiting for Waha integration"}, status=501)
         
         logger.info(f"Step 6: Storing message...")
         try:
@@ -474,180 +246,3 @@ def privacy_policy(request):
 def create_integration_instructions(request):
     """Show help on how to create a WhatsApp integration before signup."""
     return render(request, "wa360/create_integration.html", {})
-
-
-@login_required(login_url="/admin/login/")
-def connect_whatsapp_meta(request):
-    """Render embedded signup launcher for Meta WhatsApp onboarding."""
-    fb_app_id, _, fb_redirect_uri = get_meta_app_config()
-
-    if not fb_app_id or not fb_redirect_uri:
-        return render_meta_connect(
-            request,
-            "Facebook app is not configured. Please set FB_APP_ID and FB_REDIRECT_URI.",
-        )
-
-    active_org = None
-    active_org_id = request.session.get("active_org_id")
-    if active_org_id:
-        active_org = Organization.objects.filter(pk=active_org_id).first()
-
-    lookup_error = None
-
-    if request.method == "POST":
-        input_number = request.POST.get("contact_number", "").strip()
-        normalized_number = normalize_msisdn(input_number)
-
-        candidate_numbers = {value for value in [input_number, normalized_number] if value}
-        candidate_numbers.update({
-            normalized_number.lstrip("+") if normalized_number else "",
-            f"+{normalized_number}" if normalized_number and not normalized_number.startswith("+") else "",
-        })
-        candidate_numbers = {num for num in candidate_numbers if num}
-
-        integration = None
-        if candidate_numbers:
-            integration = (
-                WaIntegration.objects.select_related("organization")
-                .filter(mode__in=["sandbox", "meta"])
-                .filter(
-                    models.Q(tester_msisdn__in=candidate_numbers)
-                    | models.Q(meta_phone_number__in=candidate_numbers)
-                )
-                .first()
-            )
-
-        if integration:
-            request.session["active_org_id"] = integration.organization_id
-            active_org = integration.organization
-        else:
-            lookup_error = (
-                "No integration found for that WhatsApp number. "
-                "Please create it first or ask an administrator to add the number."
-            )
-            return redirect("create_integration_instructions")
-
-    context = {
-        "fb_app_id": fb_app_id,
-        "fb_callback_url": fb_redirect_uri,
-        "active_org": active_org,
-        "lookup_error": lookup_error,
-        "contact_number": request.POST.get("contact_number", "") if request.method == "POST" else "",
-    }
-
-    return render(request, "wa360/connect_whatsapp.html", context)
-
-
-def whatsapp_meta_callback(request):
-    """Handle Meta embedded signup callback and store integration credentials."""
-    if request.method != "GET":
-        return HttpResponseBadRequest("GET only")
-
-    logger.info(
-        "Meta callback invoked for user=%s params=%s",
-        request.user,
-        request.GET.dict(),
-    )
-
-    if request.GET.get("hub.mode") == "subscribe":
-        logger.info(
-            "===== META WEBHOOK VERIFICATION ATTEMPT ===== params=%s",
-            request.GET.dict(),
-        )
-        verify_token = request.GET.get("hub.verify_token")
-        challenge = request.GET.get("hub.challenge")
-        expected_token = getattr(settings, "FB_VERIFY_TOKEN", None)
-
-        if verify_token and expected_token and verify_token == expected_token:
-            logger.info("Meta webhook verification succeeded (challenge=%s)", challenge)
-            return HttpResponse(challenge or "", status=200)
-
-        logger.warning(
-            "Meta webhook verification failed: provided=%s expected=%s",
-            verify_token,
-            expected_token,
-        )
-        return HttpResponse("Invalid verify token", status=403)
-
-    fb_app_id, fb_app_secret, fb_redirect_uri = get_meta_app_config()
-
-    if not fb_app_id or not fb_app_secret or not fb_redirect_uri:
-        logger.error(
-            "Meta app config missing: app_id=%s secret=%s redirect=%s",
-            bool(fb_app_id),
-            bool(fb_app_secret),
-            bool(fb_redirect_uri),
-        )
-        return render_meta_connect(
-            request,
-            "Facebook app is not configured. Please set FB_APP_ID, FB_APP_SECRET, and FB_REDIRECT_URI.",
-        )
-
-    error = request.GET.get("error")
-    if error:
-        logger.warning("Meta callback received error param: %s", error)
-        return render_meta_connect(
-            request,
-            f"Facebook returned an error: {error}",
-        )
-
-    code = request.GET.get("code")
-    incoming_access_token = request.GET.get("access_token")
-    if not code and not incoming_access_token:
-        logger.warning("Meta callback missing code/access_token. Params=%s", request.GET.dict())
-        return render_meta_connect(
-            request,
-            "Missing authorization response from Facebook.",
-        )
-
-    try:
-        org = _active_org(request)
-    except Exception as exc:
-        logger.error("Failed to determine active org during Meta callback: %s", exc, exc_info=True)
-        return render_meta_connect(
-            request,
-            f"Unable to determine active organization: {exc}",
-        )
-
-    try:
-        access_token = resolve_meta_access_token(
-            code,
-            incoming_access_token,
-            fb_app_id,
-            fb_app_secret,
-            fb_redirect_uri,
-        )
-        logger.info(
-            "Resolved Meta access token for org %s (token len=%s)",
-            org.id,
-            len(access_token) if access_token else 0,
-        )
-
-        waba_id = fetch_primary_waba(access_token)
-        logger.info("Fetched WABA ID '%s' for org %s", waba_id, org.id)
-
-        phone_number_id, display_phone = fetch_primary_phone_number(waba_id, access_token)
-        logger.info(
-            "Fetched phone number id='%s' display='%s' for org %s",
-            phone_number_id,
-            display_phone,
-            org.id,
-        )
-
-        upsert_meta_integration(org, waba_id, phone_number_id, display_phone)
-        logger.info("Upserted Meta integration for org %s", org.id)
-
-        return redirect("whatsapp_chat")
-
-    except requests.exceptions.RequestException as req_error:
-        logger.error("Meta callback request failed: %s", req_error, exc_info=True)
-        return render_meta_connect(
-            request,
-            f"Failed to communicate with Facebook: {req_error}",
-        )
-    except Exception as exc:
-        logger.error("Meta callback processing failed: %s", exc, exc_info=True)
-        return render_meta_connect(
-            request,
-            str(exc),
-        )

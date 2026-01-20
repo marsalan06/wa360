@@ -1,5 +1,5 @@
 """
-Celery configuration for WhatsApp 360dialog integration
+Celery configuration for WhatsApp integration
 """
 import os
 from celery import Celery

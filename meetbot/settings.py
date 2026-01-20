@@ -144,15 +144,8 @@ MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
-# WhatsApp 360dialog Configuration
-D360_ENCRYPTION_KEY = os.getenv('D360_ENCRYPTION_KEY')
-D360_WEBHOOK_URL = os.getenv('D360_WEBHOOK_URL')
-
-# WhatsApp Meta Cloud Configuration
-FB_APP_ID = os.getenv('FB_APP_ID')
-FB_APP_SECRET = os.getenv('FB_APP_SECRET')
-FB_REDIRECT_URI = os.getenv('FB_REDIRECT_URI')
-FB_VERIFY_TOKEN = os.getenv('FB_VERIFY_TOKEN')
+# WhatsApp Configuration
+D360_ENCRYPTION_KEY = os.getenv('D360_ENCRYPTION_KEY')  # Used for API key encryption
 
 # Logging Configuration
 LOGGING = {

@@ -1,5 +1,5 @@
 """
-WhatsApp 360dialog Integration Models
+WhatsApp Integration Models
 """
 import logging
 from django.db import models
@@ -72,18 +72,19 @@ class WaMessageManager(OrganizationAwareManager):
 class WaIntegration(models.Model):
     """WhatsApp Integration Model"""
     MODE_CHOICES = [
-        ('sandbox', 'Sandbox'),
-        ('prod', 'Production'),
-        ('meta', 'Meta Cloud'),
+        ('waha', 'Waha'),
     ]
     
     organization = models.ForeignKey(Organization, on_delete=models.CASCADE, related_name="wa_integrations")
-    mode = models.CharField(max_length=16, choices=MODE_CHOICES, default="sandbox")
+    mode = models.CharField(max_length=16, choices=MODE_CHOICES, default="waha")
     raw_api_key = models.CharField(max_length=200, blank=True, help_text="Raw API key (will be encrypted automatically)")
     api_key_encrypted = models.TextField(blank=True, help_text="Encrypted API key (auto-generated)")
     tester_msisdn = models.CharField(max_length=32, blank=True, default="")
 
-    # Meta WhatsApp Cloud phone mapping (tokens stay in env)
+    # Waha session ID
+    waha_session_id = models.CharField(max_length=128, blank=True, default="", help_text="Waha session identifier")
+    
+    # Deprecated fields (kept for migration compatibility)
     meta_waba_id = models.CharField(max_length=64, blank=True, default="")
     meta_phone_number_id = models.CharField(max_length=64, blank=True, default="")
     meta_phone_number = models.CharField(max_length=32, blank=True, default="")
@@ -104,8 +105,8 @@ class WaIntegration(models.Model):
     
     def __str__(self):
         phone_display = ""
-        if self.mode == 'meta' and self.meta_phone_number:
-            phone_display = f" ({self.meta_phone_number})"
+        if self.waha_session_id:
+            phone_display = f" ({self.waha_session_id})"
         elif self.tester_msisdn:
             phone_display = f" ({self.tester_msisdn})"
         return f"{self.organization.name} - {self.mode}{phone_display}"

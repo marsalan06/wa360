@@ -8,7 +8,7 @@ from organizations.models import Organization, OrganizationUser
 import logging
 from .models import WaIntegration, WaMessage, WaConversation, LLMConfiguration, ConversationSummary, PeriodicMessageSchedule
 from .crypto import enc, dec
-from .services import set_webhook_sandbox, send_text_sandbox, send_template_sandbox
+# TODO: Add Waha service imports when implemented
 from .utils import normalize_msisdn, digits_only, summarize_conversation
 
 
@@ -127,19 +127,17 @@ class WaIntegrationAdmin(admin.ModelAdmin):
     list_display = [
         'organization',
         'mode',
+        'waha_session_id',
         'tester_msisdn',
-        'meta_phone_number_display',
-        'meta_phone_number_id_display',
-        'meta_waba_id_display',
         'masked_api_key',
         'api_key_status',
         'message_count',
         'created_at',
     ]
     list_filter = ['mode', 'created_at']
-    search_fields = ['organization__name', 'tester_msisdn', 'meta_phone_number', 'meta_phone_number_id', 'meta_waba_id']
+    search_fields = ['organization__name', 'tester_msisdn', 'waha_session_id']
     ordering = ['-created_at']
-    actions = ['connect_sandbox', 'send_message', 'update_webhook_url', 'create_conversation']
+    actions = ['send_message', 'create_conversation']  # Removed: connect_sandbox, update_webhook_url
     
     fieldsets = (
         ('Basic Information', {
@@ -150,9 +148,9 @@ class WaIntegrationAdmin(admin.ModelAdmin):
             'description': 'Enter your raw API key in the field above. It will be automatically encrypted and stored securely.',
             'classes': ('collapse',)
         }),
-        ('Meta WhatsApp Cloud', {
-            'fields': ('meta_phone_number', 'meta_phone_number_id', 'meta_waba_id'),
-            'description': 'Auto-populated after Meta embedded signup completes.',
+        ('Waha Configuration', {
+            'fields': ('waha_session_id',),
+            'description': 'Waha session identifier for WhatsApp connection.',
             'classes': ('collapse',)
         }),
         ('AI Context Settings', {
@@ -182,7 +180,6 @@ class WaIntegrationAdmin(admin.ModelAdmin):
     def get_readonly_fields(self, request, obj=None):
         """Make fields readonly based on context"""
         readonly = ['created_at', 'updated_at', 'masked_api_key']
-        readonly.extend(['meta_phone_number', 'meta_phone_number_id', 'meta_waba_id'])
         return readonly
     
     # Display methods
@@ -202,20 +199,6 @@ class WaIntegrationAdmin(admin.ModelAdmin):
     api_key_status.short_description = "Status"
     api_key_status.admin_order_field = 'api_key_encrypted'
     
-    def meta_phone_number_display(self, obj):
-        return obj.meta_phone_number or "—"
-    meta_phone_number_display.short_description = "Meta Phone"
-    meta_phone_number_display.admin_order_field = 'meta_phone_number'
-
-    def meta_phone_number_id_display(self, obj):
-        return obj.meta_phone_number_id or "—"
-    meta_phone_number_id_display.short_description = "Meta Phone ID"
-    meta_phone_number_id_display.admin_order_field = 'meta_phone_number_id'
-
-    def meta_waba_id_display(self, obj):
-        return obj.meta_waba_id or "—"
-    meta_waba_id_display.short_description = "Meta WABA ID"
-    meta_waba_id_display.admin_order_field = 'meta_waba_id'
 
     def message_count(self, obj):
         count = obj.messages.count()
@@ -262,102 +245,7 @@ class WaIntegrationAdmin(admin.ModelAdmin):
             self.message_user(request, f"❌ Failed to process {error_count} integration(s)", level=messages.WARNING)
     create_conversation.short_description = "Create conversation row for tester"
     
-    def update_webhook_url(self, request, queryset):
-        """Update webhook URL when ngrok URL changes"""
-        # Get webhook URL once (same for all integrations)
-        webhook_url, error_msg = get_webhook_url()
-        if not webhook_url:
-            self.message_user(request, error_msg, level=messages.ERROR)
-            return
-        
-        success_count = 0
-        error_count = 0
-        
-        for integration in queryset:
-            logger.info(f"Updating webhook for integration {integration.id}")
-            
-            try:
-                # Get API key
-                api_key, error_msg = get_api_key_safely(integration, "update_webhook_url")
-                if not api_key:
-                    self.message_user(request, f"❌ {integration.organization.name}: {error_msg}", level=messages.WARNING)
-                    error_count += 1
-                    continue
-                
-                # Update webhook
-                set_webhook_sandbox(api_key, webhook_url)
-                
-                self.message_user(
-                    request, 
-                    f"✅ {integration.organization.name}: Webhook URL updated successfully!",
-                    level=messages.SUCCESS
-                )
-                success_count += 1
-                
-            except Exception as e:
-                logger.error(f"Failed to update webhook for {integration.id}: {str(e)}")
-                self.message_user(request, f"❌ {integration.organization.name}: Failed to update webhook - {str(e)}", level=messages.ERROR)
-                error_count += 1
-        
-        # Summary message
-        if success_count > 0:
-            self.message_user(request, f"✅ Successfully updated webhook for {success_count} integration(s) to: {webhook_url}", level=messages.SUCCESS)
-        if error_count > 0:
-            self.message_user(request, f"❌ Failed to update {error_count} integration(s)", level=messages.WARNING)
-    update_webhook_url.short_description = "Update webhook URL with current ngrok URL"
-    
-    def connect_sandbox(self, request, queryset):
-        """Connect integration to sandbox"""
-        # Get webhook URL once (same for all integrations)
-        webhook_url, error_msg = get_webhook_url()
-        if not webhook_url:
-            self.message_user(request, error_msg, level=messages.ERROR)
-            return
-        
-        success_count = 0
-        error_count = 0
-        
-        for integration in queryset:
-            logger.info(f"Connecting sandbox for integration {integration.id}")
-            
-            try:
-                # Validate required data
-                if not integration.tester_msisdn:
-                    self.message_user(request, f"❌ {integration.organization.name}: No tester phone found. Please set tester_msisdn field first.", level=messages.WARNING)
-                    error_count += 1
-                    continue
-                
-                # Get API key
-                api_key, error_msg = get_api_key_safely(integration, "connect_sandbox")
-                if not api_key:
-                    self.message_user(request, f"❌ {integration.organization.name}: {error_msg}", level=messages.WARNING)
-                    error_count += 1
-                    continue
-                
-                # Set webhook
-                set_webhook_sandbox(api_key, webhook_url)
-                
-                self.message_user(request, f"✅ {integration.organization.name}: Integration connected and webhook set!", level=messages.SUCCESS)
-                success_count += 1
-                
-            except Exception as e:
-                logger.error(f"Failed to connect sandbox for {integration.id}: {str(e)}")
-                if "401 UNAUTHORIZED" in str(e) or "API key validation failed" in str(e):
-                    error_msg = (
-                        f"❌ {integration.organization.name}: Failed to connect - {str(e)}\n"
-                        "🔧 Check: API key correct, not expired, sandbox key, has permissions"
-                    )
-                    self.message_user(request, error_msg, level=messages.ERROR)
-                else:
-                    self.message_user(request, f"❌ {integration.organization.name}: Failed to connect - {str(e)}", level=messages.ERROR)
-                error_count += 1
-        
-        # Summary message
-        if success_count > 0:
-            self.message_user(request, f"✅ Successfully connected {success_count} integration(s) to sandbox", level=messages.SUCCESS)
-        if error_count > 0:
-            self.message_user(request, f"❌ Failed to connect {error_count} integration(s)", level=messages.WARNING)
-    connect_sandbox.short_description = "Connect selected integration to sandbox"
+    # Removed: update_webhook_url, connect_sandbox (360dialog-specific actions)
     
     def send_message(self, request, queryset):
         """Send test message"""
@@ -390,8 +278,11 @@ class WaIntegrationAdmin(admin.ModelAdmin):
                 unique_id = int(time.time() * 1000) % 10000
                 message_text = f"Hello from Django Admin! Test message #{unique_id} sent at {timestamp}"
                 
-                # Send message
-                response = send_text_sandbox(api_key, to_phone, message_text)
+                # TODO: Replace with Waha send message function
+                self.message_user(request, f"❌ {integration.organization.name}: Message sending not implemented - waiting for Waha integration", level=messages.WARNING)
+                error_count += 1
+                continue
+                # response = send_text_waha(integration.waha_session_id, to_phone, message_text)
                 
                 # Store message
                 to_phone = normalize_msisdn(to_phone)
@@ -530,79 +421,12 @@ class WaConversationAdmin(admin.ModelAdmin):
             logger.error(f"Failed to get API key: {str(e)}")
             raise
 
-    @admin.action(description="Start with template (Sandbox)")
+    @admin.action(description="Start with template")
     def start_with_template(self, request, queryset):
         """Start conversation with template message"""
-        success_count = 0
-        error_count = 0
-        
-        for conv in queryset:
-            integ = conv.integration
-            logger.info(f"Starting template conversation {conv.id}")
-            
-            try:
-                # Get API key
-                api_key = self._get_api_key(integ)
-                
-                # Normalize phone number
-                to_phone = normalize_msisdn(conv.wa_id or integ.tester_msisdn)
-                if not to_phone:
-                    self.message_user(request, f"❌ Conversation #{conv.id}: No valid phone number found", level=messages.WARNING)
-                    error_count += 1
-                    continue
-                
-                # Sandbox preflight guard
-                own_number = digits_only(integ.tester_msisdn)
-                dest_number = digits_only(to_phone)
-                if own_number != dest_number:
-                    self.message_user(
-                        request, 
-                        f"❌ Conversation #{conv.id}: Sandbox can only send to your own number ({own_number}), but selected is {dest_number}",
-                        level=messages.WARNING
-                    )
-                    error_count += 1
-                    continue
-                
-                # Send template
-                template_name = "disclaimer"
-                resp = send_template_sandbox(api_key, to_phone, template_name, components=[])
-                
-                # Extract message ID
-                msg_id = str(resp.get("messages", [{}])[0].get("id", "")) if isinstance(resp, dict) else ""
-                if not msg_id:
-                    import uuid
-                    msg_id = f"template_{uuid.uuid4().hex[:16]}"
-                
-                # Create message record
-                WaMessage.objects.create(
-                    integration=integ, 
-                    conversation=conv, 
-                    direction='out', 
-                    wa_id=to_phone,
-                    msg_id=msg_id, 
-                    msg_type='template', 
-                    text=f"[TEMPLATE] {template_name}", 
-                    payload=resp
-                )
-                
-                # Reopen conversation if closed
-                if not conv.is_open:
-                    conv.status = 'open'
-                    conv.save(update_fields=['status', 'last_msg_at'])
-                
-                self.message_user(request, f"✅ Conversation #{conv.id}: Template '{template_name}' sent to {to_phone}", level=messages.SUCCESS)
-                success_count += 1
-                
-            except Exception as e:
-                logger.exception(f"start_with_template failed for conversation {conv.id}")
-                self.message_user(request, f"❌ Conversation #{conv.id}: Failed to send template - {e}", level=messages.ERROR)
-                error_count += 1
-        
-        # Summary message
-        if success_count > 0:
-            self.message_user(request, f"✅ Successfully sent templates to {success_count} conversation(s)", level=messages.SUCCESS)
-        if error_count > 0:
-            self.message_user(request, f"❌ Failed to send templates to {error_count} conversation(s)", level=messages.WARNING)
+        # TODO: Implement with Waha template sending
+        self.message_user(request, "❌ Template sending not implemented - waiting for Waha integration", level=messages.WARNING)
+        return
 
     @admin.action(description="Send text (append)")
     def send_text(self, request, queryset):
@@ -628,8 +452,11 @@ class WaConversationAdmin(admin.ModelAdmin):
                     error_count += 1
                     continue
                 
-                # Send text message
-                resp = send_text_sandbox(api_key, to_phone, text)
+                # TODO: Replace with Waha send message function
+                self.message_user(request, f"❌ Conversation #{conv.id}: Message sending not implemented - waiting for Waha integration", level=messages.WARNING)
+                error_count += 1
+                continue
+                # resp = send_text_waha(integ.waha_session_id, to_phone, text)
                 
                 # Extract message ID
                 msg_id = str(resp.get("messages", [{}])[0].get("id", "")) if isinstance(resp, dict) else ""
@@ -742,7 +569,7 @@ class WaConversationAdmin(admin.ModelAdmin):
     def ai_reply_to_clients(self, request, queryset):
         """Generate and send AI replies to engaged clients who sent the last message"""
         from .utils import generate_ai_reply
-        from .services import send_text_sandbox
+        # TODO: Add Waha service import when implemented
         
         success_count = 0
         skipped_count = 0
@@ -785,14 +612,11 @@ class WaConversationAdmin(admin.ModelAdmin):
                     skipped_count += 1
                     continue
                 
-                # Send reply via WhatsApp
-                api_key = conv.integration.get_api_key()
-                if not api_key:
-                    self.message_user(request, f"❌ Conversation #{conv.id}: No API key found for integration", level=messages.WARNING)
-                    error_count += 1
-                    continue
-                
-                response = send_text_sandbox(api_key, conv.wa_id, ai_reply)
+                # TODO: Replace with Waha send message function
+                self.message_user(request, f"❌ Conversation #{conv.id}: Message sending not implemented - waiting for Waha integration", level=messages.WARNING)
+                error_count += 1
+                continue
+                # response = send_text_waha(conv.integration.waha_session_id, conv.wa_id, ai_reply)
                 
                 # Save message to database
                 msg_id = ""
